@@ -7,7 +7,7 @@
 #include "../src/database.h"
 #include "../src/config.h"
 
-using namespace mail2book;
+using namespace endpaper;
 namespace fs = std::filesystem;
 
 void test_rss_parsing() {
@@ -109,7 +109,7 @@ void test_database_rss() {
 
 int main() {
     std::cout << "\n╔══════════════════════════════════════╗" << std::endl;
-    std::cout << "║  Mail2Book — RSS Fetcher Tests       ║" << std::endl;
+    std::cout << "║  Endpaper — RSS Fetcher Tests       ║" << std::endl;
     std::cout << "╚══════════════════════════════════════╝" << std::endl;
 
     try {

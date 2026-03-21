@@ -1,4 +1,4 @@
-/// Mail2Book — EPUB Builder Tests
+/// Endpaper — EPUB Builder Tests
 /// Verifies EPUB 3.0 structure, content, and append functionality.
 
 #include "epub_builder.h"
@@ -12,7 +12,7 @@
 #include <zip.h>
 
 namespace fs = std::filesystem;
-using namespace mail2book;
+using namespace endpaper;
 
 #define TEST(name)                                                 \
     do {                                                           \
@@ -69,7 +69,7 @@ static int zip_entry_count(const fs::path& zip_path) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
-static const fs::path TEST_DIR = fs::temp_directory_path() / "mail2book_test";
+static const fs::path TEST_DIR = fs::temp_directory_path() / "endpaper_test";
 
 void setup() {
     fs::create_directories(TEST_DIR);
@@ -286,7 +286,7 @@ void test_empty_chapters_throws() {
 
 int main() {
     std::cout << "╔══════════════════════════════════════╗\n";
-    std::cout << "║  Mail2Book — EPUB Builder Tests      ║\n";
+    std::cout << "║  Endpaper — EPUB Builder Tests      ║\n";
     std::cout << "╚══════════════════════════════════════╝\n\n";
 
     setup();

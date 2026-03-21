@@ -5,7 +5,7 @@
 #include <future>
 #include <memory>
 
-namespace mail2book {
+namespace endpaper {
 
 struct MinifluxCategory {
     int64_t id;
@@ -56,4 +56,4 @@ private:
     std::unique_ptr<MinifluxFetcherPrivate> d;
 };
 
-} // namespace mail2book
+} // namespace endpaper

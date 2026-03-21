@@ -5,7 +5,7 @@
 #include <vector>
 #include <memory>
 
-namespace mail2book {
+namespace endpaper {
 
 struct RssItem {
     std::string title;
@@ -36,4 +36,4 @@ private:
     std::unique_ptr<RssFetcherPrivate> d;
 };
 
-} // namespace mail2book
+} // namespace endpaper

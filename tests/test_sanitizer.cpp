@@ -1,4 +1,4 @@
-/// Mail2Book — HTML Sanitizer Tests
+/// Endpaper — HTML Sanitizer Tests
 /// Verifies that the sanitizer properly strips images, styles, scripts,
 /// and preserves structural HTML.
 
@@ -15,9 +15,9 @@
         std::cout << "PASS\n";                                     \
     } while (0)
 
-using mail2book::sanitize_html;
-using mail2book::simplify_html;
-using mail2book::plain_text_to_html;
+using endpaper::sanitize_html;
+using endpaper::simplify_html;
+using endpaper::plain_text_to_html;
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
@@ -214,7 +214,7 @@ void test_simplify_collapses_br() {
 
 int main() {
     std::cout << "╔══════════════════════════════════════╗\n";
-    std::cout << "║  Mail2Book — HTML Sanitizer Tests    ║\n";
+    std::cout << "║  Endpaper — HTML Sanitizer Tests    ║\n";
     std::cout << "╚══════════════════════════════════════╝\n\n";
 
     TEST(test_removes_img_tags);

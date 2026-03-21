@@ -5,7 +5,7 @@
 #include <regex>
 #include <stdexcept>
 
-namespace mail2book {
+namespace endpaper {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -326,4 +326,4 @@ void Database::delete_rss_feed(int64_t feed_id) {
     check(sqlite3_step(sg.stmt), db_, "step");
 }
 
-} // namespace mail2book
+} // namespace endpaper

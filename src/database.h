@@ -7,7 +7,7 @@
 
 struct sqlite3;
 
-namespace mail2book {
+namespace endpaper {
 
 struct Book {
     int64_t id;
@@ -31,7 +31,7 @@ struct Chapter {
     int sort_order;
 };
 
-/// RAII SQLite database wrapper for the Mail2Book library.
+/// RAII SQLite database wrapper for the Endpaper library.
 class Database {
 public:
     /// Open (or create) the database at the given path.
@@ -71,4 +71,4 @@ private:
     sqlite3* db_ = nullptr;
 };
 
-} // namespace mail2book
+} // namespace endpaper

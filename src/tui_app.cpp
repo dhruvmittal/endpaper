@@ -15,7 +15,7 @@
 #include <regex>
 #include <thread>
 
-namespace mail2book {
+namespace endpaper {
 
 using namespace ftxui;
 namespace fs = std::filesystem;
@@ -50,7 +50,20 @@ void TuiApp::run() {
     auto screen = ScreenInteractive::Fullscreen();
 
     // ── Shared state ─────────────────────────────────────────────────────
+    bool auto_fetch_akonadi = config_.get("behavior", "auto_fetch_akonadi", "false") == "true";
+    bool auto_fetch_miniflux = config_.get("behavior", "auto_fetch_miniflux", "false") == "true";
+    bool remember_config = config_.get("behavior", "remember_config", "false") == "true";
+
     int active_tab = 0;
+    std::string last_kmail_folder;
+    std::string last_miniflux_category;
+    std::string last_build_book;
+    if (remember_config) {
+        try { active_tab = std::stoi(config_.get("state", "active_tab", "0")); } catch(...) {}
+        last_kmail_folder = config_.get("state", "last_kmail_folder", "");
+        last_miniflux_category = config_.get("state", "last_miniflux_category", "");
+        last_build_book = config_.get("state", "last_build_book", "");
+    }
     std::string status_message;
     std::mutex state_mutex;
 
@@ -77,6 +90,9 @@ void TuiApp::run() {
     int miniflux_category_selected = 0;
     int miniflux_entry_focused = 0;
     int miniflux_status_filter = 0; // 0=Unread, 1=Starred, 2=All
+    if (remember_config) {
+        try { miniflux_status_filter = std::stoi(config_.get("state", "last_miniflux_filter", "0")); } catch(...) {}
+    }
     std::string miniflux_filter_text;
     std::string miniflux_server_url = config_.get("miniflux", "url", "");
     std::string miniflux_token = config_.get("miniflux", "token", "");
@@ -342,8 +358,15 @@ void TuiApp::run() {
     rss_feeds = db_.list_rss_feeds();
     sync_rss_labels();
     epub_author = config_.get("epub", "author", "Unknown");
-    epub_publisher = config_.get("epub", "publisher", "Mail2Book");
-    if (!books.empty()) epub_output_path = "~/Documents/" + slugify(books[build_book_selected].title) + ".epub";
+    epub_publisher = config_.get("epub", "publisher", "Endpaper");
+    if (!books.empty()) {
+        if (remember_config && !last_build_book.empty()) {
+            for (size_t i = 0; i < books.size(); ++i) {
+                if (books[i].title == last_build_book) { build_book_selected = i; break; }
+            }
+        }
+        epub_output_path = "~/Documents/" + slugify(books[build_book_selected].title) + ".epub";
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     //  TAB 0: KMAIL
@@ -359,7 +382,7 @@ void TuiApp::run() {
     };
     auto email_menu = Menu(&email_labels, &email_focused, email_menu_option);
 
-    auto btn_fetch_folders = Button("⟳ Fetch Folders", [&] {
+    auto do_fetch_folders = [&] {
         if (loading_folders) return;
         loading_folders = true;
         status_message = "Fetching folders from Akonadi...";
@@ -370,6 +393,11 @@ void TuiApp::run() {
                 std::lock_guard lock(state_mutex);
                 folders = std::move(result);
                 folder_selected = 0;
+                if (remember_config && !last_kmail_folder.empty()) {
+                    for (size_t i = 0; i < folders.size(); ++i) {
+                        if (folders[i].full_path == last_kmail_folder) { folder_selected = i; break; }
+                    }
+                }
                 sync_folder_labels();
                 status_message = "Loaded " + std::to_string(folders.size()) + " folders";
             } catch (const std::exception& e) {
@@ -378,7 +406,8 @@ void TuiApp::run() {
             loading_folders = false;
             screen.Post(Event::Custom);
         }).detach();
-    });
+    };
+    auto btn_fetch_folders = Button("⟳ Fetch Folders", do_fetch_folders);
 
     auto btn_fetch_emails = Button("📧 Fetch Emails", [&] {
         if (loading_emails || folders.empty()) return;
@@ -512,7 +541,7 @@ void TuiApp::run() {
     };
     auto miniflux_entry_menu = Menu(&miniflux_entry_labels, &miniflux_entry_focused, miniflux_entry_option);
 
-    auto btn_fetch_mini_cats = Button("⟳ Fetch Categories", [&] {
+    auto do_fetch_mini_cats = [&] {
         if (miniflux_server_url.empty()) { status_message = "Set Miniflux URL in Settings!"; return; }
         loading_miniflux_categories = true;
         auto fut = miniflux_fetcher_.fetch_categories();
@@ -521,13 +550,21 @@ void TuiApp::run() {
                 auto res = fut.get();
                 std::lock_guard lock(state_mutex);
                 miniflux_categories = std::move(res);
+                if (remember_config && !last_miniflux_category.empty()) {
+                    for (size_t i = 0; i < miniflux_categories.size(); ++i) {
+                        if (miniflux_categories[i].title == last_miniflux_category) {
+                            miniflux_category_selected = i + 1; break;
+                        }
+                    }
+                }
                 sync_miniflux_category_labels();
                 status_message = "Loaded " + std::to_string(miniflux_categories.size()) + " categories";
             } catch (const std::exception& e) { status_message = e.what(); }
             loading_miniflux_categories = false;
             screen.Post(Event::Custom);
         }).detach();
-    });
+    };
+    auto btn_fetch_mini_cats = Button("⟳ Fetch Categories", do_fetch_mini_cats);
 
     auto btn_fetch_mini_entries = Button("🌀 Fetch Entries", [&] {
         if (loading_miniflux_entries) return;
@@ -1009,7 +1046,23 @@ void TuiApp::run() {
         status_message = "Fuzzy search " + std::string(fuzzy_search ? "enabled" : "disabled");
     });
 
-    auto settings_tab = Container::Vertical({input_miniflux_url, input_miniflux_token, btn_save_miniflux, input_rss_max, btn_save_rss, btn_save_fuzzy});
+    auto check_auto_akonadi = Checkbox("Auto-fetch Akonadi Folders on KMail tab", &auto_fetch_akonadi);
+    auto check_auto_miniflux = Checkbox("Auto-fetch Miniflux Categories on Miniflux tab", &auto_fetch_miniflux);
+    auto check_remember_config = Checkbox("Remember state (tab, folders, filters) across launches", &remember_config);
+    auto btn_save_behavior = Button("Save Behavior Settings", [&] {
+        config_.set("behavior", "auto_fetch_akonadi", auto_fetch_akonadi ? "true" : "false");
+        config_.set("behavior", "auto_fetch_miniflux", auto_fetch_miniflux ? "true" : "false");
+        config_.set("behavior", "remember_config", remember_config ? "true" : "false");
+        config_.save();
+        status_message = "Behavior settings saved!";
+    });
+
+    auto settings_tab = Container::Vertical({
+        input_miniflux_url, input_miniflux_token, btn_save_miniflux,
+        input_rss_max, btn_save_rss,
+        btn_save_fuzzy,
+        check_auto_akonadi, check_auto_miniflux, check_remember_config, btn_save_behavior
+    });
     auto settings_renderer = Renderer(settings_tab, [&] {
         Elements rows;
         rows.push_back(text("⚙ SETTINGS") | bold | center);
@@ -1024,6 +1077,12 @@ void TuiApp::run() {
         token_row.push_back(input_miniflux_token->Render() | flex);
         rows.push_back(hbox(std::move(token_row)));
         rows.push_back(btn_save_miniflux->Render());
+        rows.push_back(separator());
+        rows.push_back(text("Behavior & Memory") | bold);
+        rows.push_back(check_auto_akonadi->Render());
+        rows.push_back(check_auto_miniflux->Render());
+        rows.push_back(check_remember_config->Render());
+        rows.push_back(btn_save_behavior->Render());
         rows.push_back(separator());
         rows.push_back(text("RSS Options") | bold);
         Elements max_row;
@@ -1056,26 +1115,34 @@ void TuiApp::run() {
     
     auto main_container = Container::Vertical({tab_toggle, tab_content});
     auto main_component = CatchEvent(main_container, [&](Event event) {
-        if (main_container->OnEvent(event)) return true;
-        if (event == Event::F1) { active_tab = 0; return true; }
-        if (event == Event::F2) { active_tab = 1; return true; }
-        if (event == Event::F3) { active_tab = 2; return true; }
-        if (event == Event::F4) { active_tab = 3; return true; }
-        if (event == Event::F5) { active_tab = 4; return true; }
-        if (event == Event::F6) { active_tab = 5; return true; }
-        if (event == Event::Character('1')) { active_tab = 0; return true; }
-        if (event == Event::Character('2')) { active_tab = 1; return true; }
-        if (event == Event::Character('3')) { active_tab = 2; return true; }
-        if (event == Event::Character('4')) { active_tab = 3; return true; }
-        if (event == Event::Character('5')) { active_tab = 4; return true; }
-        if (event == Event::Character('6')) { active_tab = 5; return true; }
-        if (event == Event::Character('q') || event == Event::Escape) { screen.Exit(); return true; }
-        return false;
+        int prev_tab = active_tab;
+        bool handled = false;
+        
+        if (main_container->OnEvent(event)) handled = true;
+        else if (event == Event::F1) { active_tab = 0; handled = true; }
+        else if (event == Event::F2) { active_tab = 1; handled = true; }
+        else if (event == Event::F3) { active_tab = 2; handled = true; }
+        else if (event == Event::F4) { active_tab = 3; handled = true; }
+        else if (event == Event::F5) { active_tab = 4; handled = true; }
+        else if (event == Event::F6) { active_tab = 5; handled = true; }
+        else if (event == Event::Character('1')) { active_tab = 0; handled = true; }
+        else if (event == Event::Character('2')) { active_tab = 1; handled = true; }
+        else if (event == Event::Character('3')) { active_tab = 2; handled = true; }
+        else if (event == Event::Character('4')) { active_tab = 3; handled = true; }
+        else if (event == Event::Character('5')) { active_tab = 4; handled = true; }
+        else if (event == Event::Character('6')) { active_tab = 5; handled = true; }
+        else if (event == Event::Character('q') || event == Event::Escape) { screen.Exit(); return true; }
+
+        if (handled && prev_tab != active_tab) {
+            if (active_tab == 0 && auto_fetch_akonadi && folders.empty() && !loading_folders) do_fetch_folders();
+            if (active_tab == 1 && auto_fetch_miniflux && miniflux_categories.empty() && !loading_miniflux_categories) do_fetch_mini_cats();
+        }
+        return handled;
     });
 
     auto final_renderer = Renderer(main_component, [&] {
         Elements foot;
-        foot.push_back(text(" Mail2Book v0.1 ") | bold | inverted);
+        foot.push_back(text(" Endpaper v0.1 ") | bold | inverted);
         foot.push_back(text(" "));
         foot.push_back(text(status_message) | flex);
         foot.push_back(text(" [q]uit [1-6]tabs ") | dim);
@@ -1091,6 +1158,22 @@ void TuiApp::run() {
     });
 
     screen.Loop(final_renderer);
+
+    // Save state on exit if enabled
+    if (remember_config) {
+        config_.set("state", "active_tab", std::to_string(active_tab));
+        config_.set("state", "last_miniflux_filter", std::to_string(miniflux_status_filter));
+        if (folder_selected >= 0 && folder_selected < static_cast<int>(folders.size())) {
+            config_.set("state", "last_kmail_folder", folders[folder_selected].full_path);
+        }
+        if (miniflux_category_selected > 0 && miniflux_category_selected - 1 < static_cast<int>(miniflux_categories.size())) {
+            config_.set("state", "last_miniflux_category", miniflux_categories[miniflux_category_selected - 1].title);
+        }
+        if (build_book_selected >= 0 && build_book_selected < static_cast<int>(books.size())) {
+            config_.set("state", "last_build_book", books[build_book_selected].title);
+        }
+        config_.save();
+    }
 }
 
-} // namespace mail2book
+} // namespace endpaper

@@ -16,7 +16,7 @@
 #include <iostream>
 #include <thread>
 
-namespace mail2book {
+namespace endpaper {
 
 // ── Pimpl ─────────────────────────────────────────────────────────────────
 
@@ -67,7 +67,7 @@ std::future<std::vector<FolderInfo>> AkonadiFetcher::fetch_folders() {
         QObject::connect(job, &Akonadi::CollectionFetchJob::result,
                          &loop, [&](KJob* j) {
             if (j->error()) {
-                std::cerr << "[mail2book] Collection fetch error: "
+                std::cerr << "[endpaper] Collection fetch error: "
                           << j->errorString().toStdString() << "\n";
             } else {
                 auto* fetch_job =
@@ -118,7 +118,7 @@ AkonadiFetcher::fetch_emails(int64_t collection_id) {
         QObject::connect(job, &Akonadi::ItemFetchJob::result,
                          &loop, [&](KJob* j) {
             if (j->error()) {
-                std::cerr << "[mail2book] Item fetch error: "
+                std::cerr << "[endpaper] Item fetch error: "
                           << j->errorString().toStdString() << "\n";
             } else {
                 auto* fetch_job =
@@ -170,4 +170,4 @@ AkonadiFetcher::fetch_emails(int64_t collection_id) {
     });
 }
 
-} // namespace mail2book
+} // namespace endpaper

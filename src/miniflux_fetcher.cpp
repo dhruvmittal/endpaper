@@ -15,7 +15,7 @@
 #include <thread>
 #include <iostream>
 
-namespace mail2book {
+namespace endpaper {
 
 class MinifluxFetcherPrivate : public QObject {
     Q_OBJECT
@@ -58,7 +58,7 @@ std::future<std::vector<MinifluxCategory>> MinifluxFetcher::fetch_categories() {
 
             QNetworkAccessManager manager;
             QNetworkRequest request(QUrl(QString::fromStdString(base_url + "/v1/categories?counts=true")));
-            request.setHeader(QNetworkRequest::UserAgentHeader, "Mail2Book/0.1");
+            request.setHeader(QNetworkRequest::UserAgentHeader, "Endpaper/0.1");
             request.setRawHeader("X-Auth-Token", QByteArray::fromStdString(token));
 
             QNetworkReply* reply = manager.get(request);
@@ -142,7 +142,7 @@ std::future<std::vector<MinifluxEntry>> MinifluxFetcher::fetch_entries(const Fet
 
             QNetworkAccessManager manager;
             QNetworkRequest request(url);
-            request.setHeader(QNetworkRequest::UserAgentHeader, "Mail2Book/0.1");
+            request.setHeader(QNetworkRequest::UserAgentHeader, "Endpaper/0.1");
             request.setRawHeader("X-Auth-Token", QByteArray::fromStdString(token));
 
             QNetworkReply* reply = manager.get(request);
@@ -218,7 +218,7 @@ std::future<std::string> MinifluxFetcher::fetch_original_content(int64_t entry_i
 
             QNetworkAccessManager manager;
             QNetworkRequest request(QUrl(QString::fromStdString(base_url + "/v1/entries/" + std::to_string(entry_id) + "/fetch-content")));
-            request.setHeader(QNetworkRequest::UserAgentHeader, "Mail2Book/0.1");
+            request.setHeader(QNetworkRequest::UserAgentHeader, "Endpaper/0.1");
             request.setRawHeader("X-Auth-Token", QByteArray::fromStdString(token));
 
             QNetworkReply* reply = manager.get(request);
@@ -253,6 +253,6 @@ std::future<std::string> MinifluxFetcher::fetch_original_content(int64_t entry_i
     return future;
 }
 
-} // namespace mail2book
+} // namespace endpaper
 
 #include "miniflux_fetcher.moc"

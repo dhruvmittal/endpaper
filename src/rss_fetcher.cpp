@@ -12,7 +12,7 @@
 #include <iostream>
 #include <algorithm>
 
-namespace mail2book {
+namespace endpaper {
 
 class RssFetcherPrivate : public QObject {
     Q_OBJECT
@@ -47,7 +47,7 @@ std::future<std::vector<RssItem>> RssFetcher::fetch_items(const std::string& url
             
             // In Qt6, we use RedirectPolicyAttribute instead of FollowRedirectsAttribute
             request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-            request.setHeader(QNetworkRequest::UserAgentHeader, "Mail2Book/0.1");
+            request.setHeader(QNetworkRequest::UserAgentHeader, "Endpaper/0.1");
 
             QNetworkReply* reply = manager.get(request);
             QEventLoop loop;
@@ -141,6 +141,6 @@ std::vector<RssItem> RssFetcher::parse_xml(const std::string& xml_data, size_t m
     return items;
 }
 
-} // namespace mail2book
+} // namespace endpaper
 
 #include "rss_fetcher.moc"

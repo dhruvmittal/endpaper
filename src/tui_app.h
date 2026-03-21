@@ -6,7 +6,7 @@
 #include "miniflux_fetcher.h"
 #include "rss_fetcher.h"
 
-namespace mail2book {
+namespace endpaper {
 
 /// Main FTXUI-based TUI application.
 /// Provides tabbed screens: Ingest (KMail), Miniflux, RSS, Books, Build, Settings.
@@ -25,4 +25,4 @@ private:
     MinifluxFetcher& miniflux_fetcher_;
 };
 
-} // namespace mail2book
+} // namespace endpaper

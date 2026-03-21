@@ -3,7 +3,7 @@
 #include <regex>
 #include <sstream>
 
-namespace mail2book {
+namespace endpaper {
 
 std::string sanitize_html(const std::string& html) {
     std::string result = html;
@@ -156,4 +156,4 @@ std::string plain_text_to_html(const std::string& text) {
     return html.str();
 }
 
-} // namespace mail2book
+} // namespace endpaper

@@ -6,20 +6,20 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace mail2book {
+namespace endpaper {
 
 namespace fs = std::filesystem;
 
 // ── Helper: resolve XDG env with fallback ─────────────────────────────────
 static fs::path xdg_path(const char* env_var, const fs::path& fallback) {
     if (const char* val = std::getenv(env_var); val && val[0] != '\0') {
-        return fs::path(val) / "mail2book";
+        return fs::path(val) / "endpaper";
     }
     const char* home = std::getenv("HOME");
     if (!home) {
         throw std::runtime_error("$HOME is not set");
     }
-    return fs::path(home) / fallback / "mail2book";
+    return fs::path(home) / fallback / "endpaper";
 }
 
 // ── Constructor ───────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ Config::Config()
 
 // ── Path accessors ────────────────────────────────────────────────────────
 fs::path Config::config_dir()  const { return config_dir_; }
-fs::path Config::config_file() const { return config_dir_ / "mail2book.conf"; }
+fs::path Config::config_file() const { return config_dir_ / "endpaper.conf"; }
 fs::path Config::data_dir()    const { return data_dir_; }
 fs::path Config::db_path()     const { return data_dir_ / "library.db"; }
 fs::path Config::state_dir()   const { return state_dir_; }
@@ -135,4 +135,4 @@ void Config::parse_file(const fs::path& path) {
     }
 }
 
-} // namespace mail2book
+} // namespace endpaper

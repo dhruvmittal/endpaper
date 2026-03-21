@@ -12,7 +12,7 @@
 
 #include <zip.h>
 
-namespace mail2book {
+namespace endpaper {
 
 namespace fs = std::filesystem;
 
@@ -151,7 +151,7 @@ std::string EpubBuilder::make_chapter_xhtml(const EpubChapter& chapter,
 }
 
 std::string EpubBuilder::make_stylesheet() {
-    return R"(/* Mail2Book EPUB Stylesheet */
+    return R"(/* Endpaper EPUB Stylesheet */
 body {
   font-family: Georgia, "Times New Roman", serif;
   margin: 1em;
@@ -504,4 +504,4 @@ void EpubBuilder::append(const fs::path& epub_path,
     fs::rename(tmp_path, epub_path);
 }
 
-} // namespace mail2book
+} // namespace endpaper

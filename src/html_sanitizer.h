@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace mail2book {
+namespace endpaper {
 
 /// Sanitize HTML email content for clean text-only EPUB output.
 ///
@@ -22,4 +22,4 @@ namespace mail2book {
 /// Convert plain text to simple HTML (wrap lines in <p> tags).
 [[nodiscard]] std::string plain_text_to_html(const std::string& text);
 
-} // namespace mail2book
+} // namespace endpaper

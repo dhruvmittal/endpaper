@@ -1,5 +1,5 @@
 {
-  description = "Mail2Book - C++ TUI Email-to-EPUB Archiver";
+  description = "Endpaper - C++ TUI Email-to-EPUB Archiver";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,7 +14,7 @@
       in
       {
         packages.default = pkgs.stdenv.mkDerivation {
-          pname = "mail2book";
+          pname = "endpaper";
           version = "0.1.0";
           src = ./.;
 
@@ -92,7 +92,7 @@
               fi
             done
 
-            echo "🔧 Mail2Book dev shell ready"
+            echo "🔧 Endpaper dev shell ready"
             echo "   cmake -B build && cmake --build build"
           '';
         };

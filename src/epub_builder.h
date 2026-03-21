@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace mail2book {
+namespace endpaper {
 
 struct EpubChapter {
     std::string title;       // chapter title (email subject)
@@ -15,7 +15,7 @@ struct EpubChapter {
 struct EpubMetadata {
     std::string title;
     std::string author    = "Unknown";
-    std::string publisher = "Mail2Book";
+    std::string publisher = "Endpaper";
     std::string language  = "en";
     std::string uuid;        // auto-generated if empty
 };
@@ -53,4 +53,4 @@ private:
                                 const std::vector<EpubChapter>& chapters);
 };
 
-} // namespace mail2book
+} // namespace endpaper

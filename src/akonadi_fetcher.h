@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace mail2book {
+namespace endpaper {
 
 struct EmailItem {
     int64_t akonadi_id;
@@ -47,4 +47,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace mail2book
+} // namespace endpaper

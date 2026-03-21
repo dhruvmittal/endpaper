@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(mail2book VERSION 0.1.0 LANGUAGES CXX)
+project(endpaper VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,7 +33,7 @@ pkg_check_modules(LIBZIP REQUIRED libzip)
 find_package(pugixml REQUIRED)
 
 # ── Source files ───────────────────────────────────────────────────────────
-set(MAIL2BOOK_SOURCES
+set(ENDPAPER_SOURCES
     src/main.cpp
     src/config.cpp
     src/database.cpp
@@ -45,15 +45,15 @@ set(MAIL2BOOK_SOURCES
     src/tui_app.cpp
 )
 
-add_executable(mail2book ${MAIL2BOOK_SOURCES})
+add_executable(endpaper ${ENDPAPER_SOURCES})
 
-target_include_directories(mail2book PRIVATE
+target_include_directories(endpaper PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${SQLITE3_INCLUDE_DIRS}
     ${LIBZIP_INCLUDE_DIRS}
 )
 
-target_link_libraries(mail2book PRIVATE
+target_link_libraries(endpaper PRIVATE
     Qt6::Core
     Qt6::Network
     KPim6::Mime
@@ -67,12 +67,12 @@ target_link_libraries(mail2book PRIVATE
     ${LIBZIP_LIBRARIES}
 )
 
-target_link_directories(mail2book PRIVATE
+target_link_directories(endpaper PRIVATE
     ${SQLITE3_LIBRARY_DIRS}
     ${LIBZIP_LIBRARY_DIRS}
 )
 
-target_compile_options(mail2book PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(endpaper PRIVATE -Wall -Wextra -Wpedantic)
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 option(BUILD_TESTS "Build tests" ON)
@@ -82,4 +82,4 @@ if(BUILD_TESTS)
 endif()
 
 # ── Install ────────────────────────────────────────────────────────────────
-install(TARGETS mail2book DESTINATION bin)
+install(TARGETS endpaper DESTINATION bin)

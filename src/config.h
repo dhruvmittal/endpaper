@@ -4,7 +4,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace mail2book {
+namespace endpaper {
 
 /// XDG-compliant configuration manager.
 /// Resolves paths, creates directories, parses INI-style .conf files.
@@ -49,4 +49,4 @@ private:
                        std::unordered_map<std::string, std::string>> values_;
 };
 
-} // namespace mail2book
+} // namespace endpaper
