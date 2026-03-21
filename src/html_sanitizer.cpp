@@ -1,0 +1,159 @@
+#include "html_sanitizer.h"
+
+#include <regex>
+#include <sstream>
+
+namespace mail2book {
+
+std::string sanitize_html(const std::string& html) {
+    std::string result = html;
+
+    // 1. Remove <style>...</style> blocks (case-insensitive, including content)
+    {
+        std::regex style_block(R"(<style[^>]*>[\s\S]*?</style\s*>)",
+                               std::regex::icase);
+        result = std::regex_replace(result, style_block, "");
+    }
+
+    // 2. Remove all <img ...> tags (self-closing or not)
+    {
+        std::regex img_tag(R"(<img\b[^>]*\/?>)", std::regex::icase);
+        result = std::regex_replace(result, img_tag, "");
+    }
+
+    // 3. Remove all <picture>...</picture> blocks
+    {
+        std::regex picture_block(R"(<picture[^>]*>[\s\S]*?</picture\s*>)",
+                                 std::regex::icase);
+        result = std::regex_replace(result, picture_block, "");
+    }
+
+    // 4. Remove <script>...</script> blocks
+    {
+        std::regex script_block(R"(<script[^>]*>[\s\S]*?</script\s*>)",
+                                std::regex::icase);
+        result = std::regex_replace(result, script_block, "");
+    }
+
+    // 5. Remove style="..." attributes from all tags
+    {
+        std::regex style_attr(R"(\s+style\s*=\s*"[^"]*")",
+                              std::regex::icase);
+        result = std::regex_replace(result, style_attr, "");
+    }
+    // Also handle style='...' (single quotes)
+    {
+        std::regex style_attr_sq(R"(\s+style\s*=\s*'[^']*')",
+                                 std::regex::icase);
+        result = std::regex_replace(result, style_attr_sq, "");
+    }
+
+    // 6. Remove class="..." attributes (web formatting cleanup)
+    {
+        std::regex class_attr(R"(\s+class\s*=\s*"[^"]*")",
+                              std::regex::icase);
+        result = std::regex_replace(result, class_attr, "");
+    }
+    {
+        std::regex class_attr_sq(R"(\s+class\s*=\s*'[^']*')",
+                                 std::regex::icase);
+        result = std::regex_replace(result, class_attr_sq, "");
+    }
+
+    // 7. Remove <!--...--> comments
+    {
+        std::regex comment(R"(<!--[\s\S]*?-->)");
+        result = std::regex_replace(result, comment, "");
+    }
+
+    // 8. Collapse multiple blank lines into one
+    {
+        std::regex multi_blank(R"(\n{3,})");
+        result = std::regex_replace(result, multi_blank, "\n\n");
+    }
+
+    return result;
+}
+
+std::string simplify_html(const std::string& html) {
+    // 1. Start with normal sanitization (removes images, styles, scripts)
+    std::string result = sanitize_html(html);
+
+    // 2. Remove common newsletter junk blocks (Unsubscribe, Manage, etc.)
+    // We target blocks (div/table/section) that contain these keywords nearby.
+    {
+        // Remove blocks that look like footers
+        std::regex junk_patterns(R"(Unsubscribe|Manage your email settings|Manage your subscription|Powered by [a-zA-Z]+|View in browser|Open in app|Sent from my|© [12][0-9]{3})",
+                                std::regex::icase);
+        
+        // This is a heuristic: if we find a junk pattern, try to remove the surrounding block
+        // Since we don't have a DOM, we just remove the lines containing them if they are short,
+        // or just the words themselves for now to be safe.
+        // Better: Remove elements that are likely footers.
+        std::regex footer_tags(R"(<(footer|header|nav|aside)[^>]*>[\s\S]*?</\1>)", std::regex::icase);
+        result = std::regex_replace(result, footer_tags, "");
+    }
+
+    // 3. Strip layout-only tags but KEEP their content
+    // tags to remove: div, span, table, tr, td, th, tbody, thead, tfoot, article, section, center, font
+    {
+        std::regex layout_tags(R"(<\/?(div|span|table|tr|td|th|tbody|thead|tfoot|article|section|center|font)\b[^>]*>)",
+                               std::regex::icase);
+        result = std::regex_replace(result, layout_tags, "");
+    }
+
+    // 4. Strip ALL remaining attributes from allowed tags (p, h1-h6, blockquote, a, etc.)
+    // This makes the HTML purely semantic.
+    {
+        // Matches any attribute (key="value" 0r key='value' or key=value)
+        std::regex attr_regex(R"(\s+[a-z-]+(\s*=\s*("[^"]*"|'[^']*'|[^>\s]+))?)",
+                             std::regex::icase);
+        
+        // We only want to remove attributes from our preserved tags.
+        // This regex is slightly tricky without a parser, but since we already
+        // stripped most tags, we can just remove all attributes from all remaining tags
+        // by looking for anything inside <...> after the tag name.
+        std::regex tag_content(R"(<([a-z1-6]+)\b[^>]*?(/?)>)", std::regex::icase);
+        result = std::regex_replace(result, tag_content, "<$1$2>");
+    }
+
+    // 5. Final cleanup
+    {
+        std::regex multi_br(R"((<br\s*\/?>\s*){3,})", std::regex::icase);
+        result = std::regex_replace(result, multi_br, "<br /><br />");
+        
+        std::regex multi_blank(R"(\n{3,})");
+        result = std::regex_replace(result, multi_blank, "\n\n");
+    }
+
+    return result;
+}
+
+std::string plain_text_to_html(const std::string& text) {
+    std::ostringstream html;
+    std::istringstream stream(text);
+    std::string line;
+
+    while (std::getline(stream, line)) {
+        if (line.empty()) {
+            html << "<br />\n";
+        } else {
+            // Basic HTML escaping
+            std::string escaped;
+            for (char c : line) {
+                switch (c) {
+                    case '&':  escaped += "&amp;";  break;
+                    case '<':  escaped += "&lt;";   break;
+                    case '>':  escaped += "&gt;";   break;
+                    case '"':  escaped += "&quot;";  break;
+                    default:   escaped += c;         break;
+                }
+            }
+            html << "<p>" << escaped << "</p>\n";
+        }
+    }
+
+    return html.str();
+}
+
+} // namespace mail2book
