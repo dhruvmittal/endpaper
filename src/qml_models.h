@@ -41,7 +41,7 @@ public:
         return QVariant();
     }
 
-    Q_INVOKABLE int indexOf(int bookId) const {
+    Q_INVOKABLE int indexOf(qint64 bookId) const {
         for (int i = 0; i < static_cast<int>(m_books.size()); ++i) {
             if (m_books[i].id == bookId) return i;
         }
@@ -61,6 +61,7 @@ private:
 class FolderModel : public QAbstractListModel {
     Q_OBJECT
     QML_ELEMENT
+    Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
 public:
     enum Roles { CollectionIdRole = Qt::UserRole + 1, NameRole, FullPathRole };
     explicit FolderModel(QObject* parent = nullptr) : QAbstractListModel(parent) {}
@@ -69,6 +70,7 @@ public:
         beginResetModel();
         m_folders = folders;
         endResetModel();
+        emit countChanged();
     }
 
     const std::vector<FolderInfo>& getFolders() const { return m_folders; }
@@ -87,9 +89,18 @@ public:
         return QVariant();
     }
 
+    Q_INVOKABLE int indexOf(qint64 collectionId) const {
+        for (int i = 0; i < static_cast<int>(m_folders.size()); ++i) {
+            if (m_folders[i].collection_id == collectionId) return i;
+        }
+        return -1;
+    }
+
     QHash<int, QByteArray> roleNames() const override {
         return { {CollectionIdRole, "collectionId"}, {NameRole, "name"}, {FullPathRole, "fullPath"} };
     }
+signals:
+    void countChanged();
 private:
     std::vector<FolderInfo> m_folders;
 };
@@ -215,6 +226,7 @@ private:
 class MinifluxCategoryModel : public QAbstractListModel {
     Q_OBJECT
     QML_ELEMENT
+    Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
 public:
     enum Roles { IdRole = Qt::UserRole + 1, TitleRole, UnreadCountRole };
     explicit MinifluxCategoryModel(QObject* parent = nullptr) : QAbstractListModel(parent) {}
@@ -223,6 +235,7 @@ public:
         beginResetModel();
         m_categories = categories;
         endResetModel();
+        emit countChanged();
     }
 
     const std::vector<MinifluxCategory>& getCategories() const { return m_categories; }
@@ -241,9 +254,18 @@ public:
         return QVariant();
     }
 
+    Q_INVOKABLE int indexOf(qint64 categoryId) const {
+        for (int i = 0; i < static_cast<int>(m_categories.size()); ++i) {
+            if (m_categories[i].id == categoryId) return i;
+        }
+        return -1;
+    }
+
     QHash<int, QByteArray> roleNames() const override {
         return { {IdRole, "id"}, {TitleRole, "title"}, {UnreadCountRole, "unreadCount"} };
     }
+signals:
+    void countChanged();
 private:
     std::vector<MinifluxCategory> m_categories;
 };
@@ -333,6 +355,7 @@ private:
 class RssFeedModel : public QAbstractListModel {
     Q_OBJECT
     QML_ELEMENT
+    Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
 public:
     enum Roles { IdRole = Qt::UserRole + 1, TitleRole, UrlRole };
     explicit RssFeedModel(QObject* parent = nullptr) : QAbstractListModel(parent) {}
@@ -341,6 +364,7 @@ public:
         beginResetModel();
         m_feeds = feeds;
         endResetModel();
+        emit countChanged();
     }
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override {
@@ -357,9 +381,18 @@ public:
         return QVariant();
     }
 
+    Q_INVOKABLE int indexOf(qint64 feedId) const {
+        for (int i = 0; i < static_cast<int>(m_feeds.size()); ++i) {
+            if (m_feeds[i].id == feedId) return i;
+        }
+        return -1;
+    }
+
     QHash<int, QByteArray> roleNames() const override {
         return { {IdRole, "id"}, {TitleRole, "title"}, {UrlRole, "url"} };
     }
+signals:
+    void countChanged();
 private:
     std::vector<RssFeed> m_feeds;
 };

@@ -36,11 +36,18 @@ class EndpaperBridge : public QObject {
     Q_PROPERTY(endpaper::RssEntryModel* rssEntryModel READ rssEntryModel CONSTANT)
     Q_PROPERTY(endpaper::ArticleFilterModel* rssFilterModel READ rssFilterModel CONSTANT)
 
-    Q_PROPERTY(int selectedBookId READ selectedBookId WRITE setSelectedBookId NOTIFY selectedBookIdChanged)
+    Q_PROPERTY(qint64 selectedBookId READ selectedBookId WRITE setSelectedBookId NOTIFY selectedBookIdChanged)
 
     Q_PROPERTY(bool autoFetchKMail READ autoFetchKMail WRITE setAutoFetchKMail NOTIFY autoFetchKMailChanged)
     Q_PROPERTY(bool autoFetchMiniflux READ autoFetchMiniflux WRITE setAutoFetchMiniflux NOTIFY autoFetchMinifluxChanged)
     Q_PROPERTY(bool cacheMetadata READ cacheMetadata WRITE setCacheMetadata NOTIFY cacheMetadataChanged)
+    Q_PROPERTY(bool rememberState READ rememberState WRITE setRememberState NOTIFY rememberStateChanged)
+
+    Q_PROPERTY(int lastPageIndex READ lastPageIndex WRITE setLastPageIndex NOTIFY lastPageIndexChanged)
+    Q_PROPERTY(qint64 lastKMailCollectionId READ lastKMailCollectionId WRITE setLastKMailCollectionId NOTIFY lastKMailCollectionIdChanged)
+    Q_PROPERTY(qint64 lastMinifluxCategoryId READ lastMinifluxCategoryId WRITE setLastMinifluxCategoryId NOTIFY lastMinifluxCategoryIdChanged)
+    Q_PROPERTY(int lastMinifluxStatusFilter READ lastMinifluxStatusFilter WRITE setLastMinifluxStatusFilter NOTIFY lastMinifluxStatusFilterChanged)
+    Q_PROPERTY(qint64 lastRssFeedId READ lastRssFeedId WRITE setLastRssFeedId NOTIFY lastRssFeedIdChanged)
 
 public:
     explicit EndpaperBridge(QObject* parent = nullptr);
@@ -65,8 +72,8 @@ public:
     ArticleFilterModel* minifluxFilterModel() const { return m_minifluxFilterModel; }
     ArticleFilterModel* rssFilterModel() const { return m_rssFilterModel; }
 
-    int selectedBookId() const { return m_selectedBookId; }
-    void setSelectedBookId(int id);
+    qint64 selectedBookId() const { return m_selectedBookId; }
+    void setSelectedBookId(qint64 id);
 
     Q_INVOKABLE int currentModifiers() const {
         return static_cast<int>(QGuiApplication::keyboardModifiers());
@@ -74,23 +81,23 @@ public:
 
     // --- KMail Methods ---──────────────────────────────────────────────
     Q_INVOKABLE void fetchFolders();
-    Q_INVOKABLE void fetchEmails(int collectionId);
+    Q_INVOKABLE void fetchEmails(qint64 collectionId);
     Q_INVOKABLE void stageSelectedEmails();
     Q_INVOKABLE void selectAllEmails();
     Q_INVOKABLE void deselectAllEmails();
 
     // ── Miniflux actions ──────────────────────────────────────────
     Q_INVOKABLE void fetchMinifluxCategories();
-    Q_INVOKABLE void fetchMinifluxEntries(int categoryId, int statusFilter);
+    Q_INVOKABLE void fetchMinifluxEntries(qint64 categoryId, int statusFilter);
     Q_INVOKABLE void stageSelectedMiniflux();
     Q_INVOKABLE void selectAllMiniflux();
     Q_INVOKABLE void deselectAllMiniflux();
 
     // ── RSS actions ───────────────────────────────────────────────
     Q_INVOKABLE void addRssFeed(const QString& title, const QString& url);
-    Q_INVOKABLE void removeRssFeed(int feedId);
+    Q_INVOKABLE void removeRssFeed(qint64 feedId);
     Q_INVOKABLE void fetchRssFeeds();
-    Q_INVOKABLE void fetchRssEntries(int feedId);
+    Q_INVOKABLE void fetchRssEntries(qint64 feedId);
     Q_INVOKABLE void stageSelectedRss();
     Q_INVOKABLE void selectAllRss();
     Q_INVOKABLE void deselectAllRss();
@@ -98,11 +105,11 @@ public:
     // ── Book actions ───────────────────────────────────────────────
     Q_INVOKABLE void refreshBooks();
     Q_INVOKABLE void createBook(const QString& title);
-    Q_INVOKABLE void deleteBook(int bookId);
+    Q_INVOKABLE void deleteBook(qint64 bookId);
     Q_INVOKABLE void refreshChapters();
-    Q_INVOKABLE void deleteChapter(int chapterId);
-    Q_INVOKABLE void moveChapterUp(int chapterId);
-    Q_INVOKABLE void moveChapterDown(int chapterId);
+    Q_INVOKABLE void deleteChapter(qint64 chapterId);
+    Q_INVOKABLE void moveChapterUp(qint64 chapterId);
+    Q_INVOKABLE void moveChapterDown(qint64 chapterId);
     Q_INVOKABLE void buildEpub(const QString& author, const QString& publisher, const QString& outPath, bool append, bool simplify);
 
     Q_INVOKABLE void pageOpened(const QString& pageName);
@@ -113,6 +120,19 @@ public:
     void setAutoFetchMiniflux(bool enabled);
     bool cacheMetadata() const;
     void setCacheMetadata(bool enabled);
+    bool rememberState() const;
+    void setRememberState(bool enabled);
+
+    int lastPageIndex() const;
+    void setLastPageIndex(int index);
+    qint64 lastKMailCollectionId() const;
+    void setLastKMailCollectionId(qint64 id);
+    qint64 lastMinifluxCategoryId() const;
+    void setLastMinifluxCategoryId(qint64 id);
+    int lastMinifluxStatusFilter() const;
+    void setLastMinifluxStatusFilter(int filter);
+    qint64 lastRssFeedId() const;
+    void setLastRssFeedId(qint64 id);
 
 private:
     void setStatus(const QString& msg);
@@ -120,7 +140,7 @@ private:
 
     QString m_statusMessage;
     bool m_isBusy = false;
-    int m_selectedBookId = -1;
+    qint64 m_selectedBookId = -1;
 
     BookModel* m_bookModel = nullptr;
     FolderModel* m_folderModel = nullptr;
@@ -148,6 +168,12 @@ signals:
     void autoFetchKMailChanged();
     void autoFetchMinifluxChanged();
     void cacheMetadataChanged();
+    void rememberStateChanged();
+    void lastPageIndexChanged();
+    void lastKMailCollectionIdChanged();
+    void lastMinifluxCategoryIdChanged();
+    void lastMinifluxStatusFilterChanged();
+    void lastRssFeedIdChanged();
 };
 
 } // namespace endpaper

@@ -55,6 +55,13 @@ Kirigami.ScrollablePage {
                 checked: Bridge.cacheMetadata
                 onToggled: Bridge.cacheMetadata = checked
             }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormSwitchDelegate {
+                text: "Remember Last Application State"
+                description: "Restore previous focus, category, and filter selections on startup"
+                checked: Bridge.rememberState
+                onToggled: Bridge.rememberState = checked
+            }
         }
 
         FormCard.FormHeader {

@@ -7,7 +7,10 @@ import org.kde.endpaper 1.0
 import "../Components" as Components
 
 Kirigami.Page {
+    id: root
     title: "RSS Feed Ingest"
+
+    property bool __ready: false
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
@@ -50,10 +53,37 @@ Kirigami.Page {
             
             FormCard.FormComboBoxDelegate {
                 id: feedComboBox
-                text: "Select Feed"
+                text: "Feed"
                 model: Bridge.rssFeedModel
                 textRole: "title"
                 valueRole: "id"
+                onCurrentValueChanged: {
+                    if (root.__ready && currentValue !== undefined) {
+                        Bridge.lastRssFeedId = currentValue
+                        Bridge.fetchRssEntries(currentValue)
+                    }
+                }
+
+                function syncSelection() {
+                    if (Bridge.lastRssFeedId !== -1 && model.count > 0) {
+                        const idx = model.indexOf(Bridge.lastRssFeedId)
+                        if (idx !== -1 && currentIndex !== idx) {
+                            currentIndex = idx
+                        }
+                    }
+                    if (model.count > 0) readyTimer.start()
+                }
+
+                Component.onCompleted: syncSelection()
+                Connections {
+                    target: feedComboBox.model
+                    function onCountChanged() { feedComboBox.syncSelection() }
+                }
+                Timer {
+                    id: readyTimer
+                    interval: 100
+                    onTriggered: root.__ready = true
+                }
             }
             
             FormCard.FormDelegateSeparator {}

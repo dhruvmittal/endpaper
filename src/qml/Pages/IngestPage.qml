@@ -6,9 +6,11 @@ import org.kde.kirigamiaddons.formcard as FormCard
 import org.kde.endpaper 1.0
 import "../Components" as Components
 
-    Kirigami.Page {
+Kirigami.Page {
+    id: root
     title: "KMail Ingest"
 
+    property bool __ready: false
     Component.onCompleted: Bridge.pageOpened("kmail")
 
     ColumnLayout {
@@ -39,10 +41,40 @@ import "../Components" as Components
             
             FormCard.FormComboBoxDelegate {
                 id: folderComboBox
-                text: "Collection"
+                text: "Folder"
                 model: Bridge.folderModel
                 textRole: "fullPath"
                 valueRole: "collectionId"
+                onCurrentValueChanged: {
+                    if (root.__ready && currentValue !== undefined) {
+                        Bridge.lastKMailCollectionId = currentValue
+                        Bridge.fetchEmails(currentValue)
+                    }
+                }
+                
+                function syncSelection() {
+                    if (Bridge.lastKMailCollectionId !== -1 && model.count > 0) {
+                        const idx = model.indexOf(Bridge.lastKMailCollectionId)
+                        if (idx !== -1 && currentIndex !== idx) {
+                            currentIndex = idx
+                        }
+                    }
+                    // After the first count or completed, we consider it ready
+                    if (model.count > 0) {
+                        readyTimer.start()
+                    }
+                }
+
+                Component.onCompleted: syncSelection()
+                Connections {
+                    target: folderComboBox.model
+                    function onCountChanged() { folderComboBox.syncSelection() }
+                }
+                Timer {
+                    id: readyTimer
+                    interval: 100
+                    onTriggered: root.__ready = true
+                }
             }
             
             FormCard.FormDelegateSeparator {}
@@ -51,9 +83,10 @@ import "../Components" as Components
                 text: "Fetch Emails"
                 icon.name: "mail-folder-inbox"
                 onClicked: {
-                    if (folderComboBox.currentValue !== undefined) {
-                        Bridge.fetchEmails(folderComboBox.currentValue)
-                    }
+                    // This button is now redundant as fetching happens on combo box change
+                    // if (folderComboBox.currentValue !== undefined) {
+                    //     Bridge.fetchEmails(folderComboBox.currentValue)
+                    // }
                 }
             }
         }

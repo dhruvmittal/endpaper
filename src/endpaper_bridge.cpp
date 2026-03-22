@@ -61,6 +61,11 @@ void EndpaperBridge::init(Config* config, Database* db, AkonadiFetcher* fetcher,
         }
     }
 
+    if (rememberState()) {
+        int bookId = std::stoi(m_config->get("general", "selected_book_id", "-1"));
+        if (bookId != -1) setSelectedBookId(bookId);
+    }
+
     refreshBooks();
     fetchRssFeeds();
 }
@@ -87,9 +92,13 @@ void EndpaperBridge::setBusy(bool busy) {
     }
 }
 
-void EndpaperBridge::setSelectedBookId(int id) {
+void EndpaperBridge::setSelectedBookId(qint64 id) {
     if (m_selectedBookId != id) {
         m_selectedBookId = id;
+        if (rememberState()) {
+            m_config->set("general", "selected_book_id", std::to_string(id));
+            m_config->save();
+        }
         emit selectedBookIdChanged();
         refreshChapters();
     }
@@ -112,7 +121,7 @@ void EndpaperBridge::createBook(const QString& title) {
     setStatus("Book created: " + title);
 }
 
-void EndpaperBridge::deleteBook(int bookId) {
+void EndpaperBridge::deleteBook(qint64 bookId) {
     if (!m_db) return;
     m_db->delete_book(bookId);
     if (m_selectedBookId == bookId) m_selectedBookId = -1;
@@ -129,32 +138,36 @@ void EndpaperBridge::refreshChapters() {
     m_chapterModel->setChapters(chapters);
 }
 
-void EndpaperBridge::deleteChapter(int chapterId) {
+void EndpaperBridge::deleteChapter(qint64 chapterId) {
     if (!m_db) return;
     m_db->delete_chapter(chapterId);
     refreshChapters();
 }
 
-void EndpaperBridge::moveChapterUp(int chapterId) {
+void EndpaperBridge::moveChapterUp(qint64 chapterId) {
     if (!m_db || m_selectedBookId == -1) return;
     auto chaps = m_db->get_chapters(m_selectedBookId);
     for (size_t i = 1; i < chaps.size(); ++i) {
         if (chaps[i].id == chapterId) {
-            m_db->update_sort_order(chaps[i].id, chaps[i-1].sort_order);
-            m_db->update_sort_order(chaps[i-1].id, chaps[i].sort_order);
+            int oldOrder = chaps[i].sort_order;
+            int newOrder = chaps[i-1].sort_order;
+            m_db->update_sort_order(chaps[i].id, newOrder);
+            m_db->update_sort_order(chaps[i-1].id, oldOrder);
             refreshChapters();
             break;
         }
     }
 }
 
-void EndpaperBridge::moveChapterDown(int chapterId) {
+void EndpaperBridge::moveChapterDown(qint64 chapterId) {
     if (!m_db || m_selectedBookId == -1) return;
     auto chaps = m_db->get_chapters(m_selectedBookId);
     for (size_t i = 0; i < chaps.size(); ++i) {
         if (i < chaps.size() - 1 && chaps[i].id == chapterId) {
-            m_db->update_sort_order(chaps[i].id, chaps[i+1].sort_order);
-            m_db->update_sort_order(chaps[i+1].id, chaps[i].sort_order);
+            int oldOrder = chaps[i].sort_order;
+            int newOrder = chaps[i+1].sort_order;
+            m_db->update_sort_order(chaps[i].id, newOrder);
+            m_db->update_sort_order(chaps[i+1].id, oldOrder);
             refreshChapters();
             break;
         }
@@ -202,7 +215,7 @@ void EndpaperBridge::fetchFolders() {
     }).detach();
 }
 
-void EndpaperBridge::fetchEmails(int collectionId) {
+void EndpaperBridge::fetchEmails(qint64 collectionId) {
     if (!m_fetcher || isBusy() || collectionId <= 0) return;
     setBusy(true);
     setStatus("Fetching emails for folder...");
@@ -329,7 +342,7 @@ void EndpaperBridge::fetchMinifluxCategories() {
     }).detach();
 }
 
-void EndpaperBridge::fetchMinifluxEntries(int categoryId, int statusFilter) {
+void EndpaperBridge::fetchMinifluxEntries(qint64 categoryId, int statusFilter) {
     if (!m_minifluxFetcher || isBusy()) return;
     
     std::string url = m_config->get("miniflux", "url", "");
@@ -406,7 +419,7 @@ void EndpaperBridge::addRssFeed(const QString& title, const QString& url) {
     setStatus("Added RSS feed: " + title);
 }
 
-void EndpaperBridge::removeRssFeed(int feedId) {
+void EndpaperBridge::removeRssFeed(qint64 feedId) {
     if (!m_db) return;
     m_db->delete_rss_feed(feedId);
     fetchRssFeeds();
@@ -420,7 +433,7 @@ void EndpaperBridge::fetchRssFeeds() {
     // setStatus(QString("Loaded %1 RSS feeds").arg(feeds.size()));
 }
 
-void EndpaperBridge::fetchRssEntries(int feedId) {
+void EndpaperBridge::fetchRssEntries(qint64 feedId) {
     if (!m_db || !m_rssFetcher || isBusy()) return;
     
     auto feeds = m_db->list_rss_feeds();
@@ -618,5 +631,75 @@ void EndpaperBridge::setCacheMetadata(bool enabled) {
     m_config->set("general", "cache_metadata", enabled ? "true" : "false");
     m_config->save();
     emit cacheMetadataChanged();
+}
+
+bool EndpaperBridge::rememberState() const {
+    return m_config->get("general", "remember_state", "true") == "true";
+}
+
+void EndpaperBridge::setRememberState(bool enabled) {
+    m_config->set("general", "remember_state", enabled ? "true" : "false");
+    m_config->save();
+    emit rememberStateChanged();
+}
+
+int EndpaperBridge::lastPageIndex() const {
+    return std::stoi(m_config->get("state", "last_page_index", "0"));
+}
+
+void EndpaperBridge::setLastPageIndex(int index) {
+    if (rememberState()) {
+        m_config->set("state", "last_page_index", std::to_string(index));
+        m_config->save();
+    }
+    emit lastPageIndexChanged();
+}
+
+qint64 EndpaperBridge::lastKMailCollectionId() const {
+    return std::stoll(m_config->get("state", "last_kmail_collection_id", "-1"));
+}
+
+void EndpaperBridge::setLastKMailCollectionId(qint64 id) {
+    if (rememberState()) {
+        m_config->set("state", "last_kmail_collection_id", std::to_string(id));
+        m_config->save();
+    }
+    emit lastKMailCollectionIdChanged();
+}
+
+qint64 EndpaperBridge::lastMinifluxCategoryId() const {
+    return std::stoll(m_config->get("state", "last_miniflux_category_id", "-1"));
+}
+
+void EndpaperBridge::setLastMinifluxCategoryId(qint64 id) {
+    if (rememberState()) {
+        m_config->set("state", "last_miniflux_category_id", std::to_string(id));
+        m_config->save();
+    }
+    emit lastMinifluxCategoryIdChanged();
+}
+
+int EndpaperBridge::lastMinifluxStatusFilter() const {
+    return std::stoi(m_config->get("state", "last_miniflux_status_filter", "0"));
+}
+
+void EndpaperBridge::setLastMinifluxStatusFilter(int filter) {
+    if (rememberState()) {
+        m_config->set("state", "last_miniflux_status_filter", std::to_string(filter));
+        m_config->save();
+    }
+    emit lastMinifluxStatusFilterChanged();
+}
+
+qint64 EndpaperBridge::lastRssFeedId() const {
+    return std::stoll(m_config->get("state", "last_rss_feed_id", "-1"));
+}
+
+void EndpaperBridge::setLastRssFeedId(qint64 id) {
+    if (rememberState()) {
+        m_config->set("state", "last_rss_feed_id", std::to_string(id));
+        m_config->save();
+    }
+    emit lastRssFeedIdChanged();
 }
 

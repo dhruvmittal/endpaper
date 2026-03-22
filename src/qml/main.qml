@@ -24,6 +24,7 @@ Controls.ApplicationWindow {
             ListView {
                 id: sidebar
                 anchors.fill: parent
+                currentIndex: Bridge.lastPageIndex
                 model: ListModel {
                     ListElement { name: "KMail Ingest"; iconName: "mail-folder-inbox"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/IngestPage.qml" }
                     ListElement { name: "Miniflux Ingest"; iconName: "view-web-browser-dom-tree"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/MinifluxPage.qml" }
@@ -38,7 +39,7 @@ Controls.ApplicationWindow {
                     icon.name: model.iconName
                     highlighted: ListView.isCurrentItem
                     onClicked: {
-                        sidebar.currentIndex = index
+                        Bridge.lastPageIndex = index
                         stack.replace(model.pageUri, {}, Controls.StackView.Immediate)
                     }
                 }
@@ -54,7 +55,7 @@ Controls.ApplicationWindow {
             id: stack
             Layout.fillWidth: true
             Layout.fillHeight: true
-            initialItem: "qrc:/org/kde/endpaper/src/qml/Pages/IngestPage.qml"
+            initialItem: sidebar.model.get(Bridge.lastPageIndex).pageUri
         }
     }
 }

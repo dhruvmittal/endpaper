@@ -10,9 +10,8 @@ Kirigami.Page {
     id: root
     title: "Miniflux Ingest"
     
+    property bool __ready: false
     Component.onCompleted: Bridge.pageOpened("miniflux")
-    
-    property int statusIndex: 0
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
@@ -45,6 +44,33 @@ Kirigami.Page {
                 model: Bridge.minifluxCategoryModel
                 textRole: "title"
                 valueRole: "id"
+                onCurrentValueChanged: {
+                    if (root.__ready && currentValue !== undefined) {
+                        Bridge.lastMinifluxCategoryId = currentValue
+                        Bridge.fetchMinifluxEntries(currentValue, Bridge.lastMinifluxStatusFilter)
+                    }
+                }
+
+                function syncSelection() {
+                    if (Bridge.lastMinifluxCategoryId !== -1 && model.count > 0) {
+                        const idx = model.indexOf(Bridge.lastMinifluxCategoryId)
+                        if (idx !== -1 && currentIndex !== idx) {
+                            currentIndex = idx
+                        }
+                    }
+                    if (model.count > 0) readyTimer.start()
+                }
+
+                Component.onCompleted: syncSelection()
+                Connections {
+                    target: categoryComboBox.model
+                    function onCountChanged() { categoryComboBox.syncSelection() }
+                }
+                Timer {
+                    id: readyTimer
+                    interval: 100
+                    onTriggered: root.__ready = true
+                }
             }
             
             FormCard.FormDelegateSeparator {}
@@ -62,16 +88,27 @@ Kirigami.Page {
                     }
                     Controls.RadioButton {
                         text: "Unread"
-                        checked: true
-                        onClicked: root.statusIndex = 0
+                        checked: Bridge.lastMinifluxStatusFilter === 0
+                        onClicked: {
+                            Bridge.lastMinifluxStatusFilter = 0
+                            Bridge.fetchMinifluxEntries(categoryComboBox.currentValue, 0)
+                        }
                     }
                     Controls.RadioButton {
                         text: "Starred"
-                        onClicked: root.statusIndex = 1
+                        checked: Bridge.lastMinifluxStatusFilter === 1
+                        onClicked: {
+                            Bridge.lastMinifluxStatusFilter = 1
+                            Bridge.fetchMinifluxEntries(categoryComboBox.currentValue, 1)
+                        }
                     }
                     Controls.RadioButton {
                         text: "All"
-                        onClicked: root.statusIndex = 2
+                        checked: Bridge.lastMinifluxStatusFilter === 2
+                        onClicked: {
+                            Bridge.lastMinifluxStatusFilter = 2
+                            Bridge.fetchMinifluxEntries(categoryComboBox.currentValue, 2)
+                        }
                     }
                 }
             }
@@ -83,7 +120,7 @@ Kirigami.Page {
                 icon.name: "download"
                 onClicked: {
                     let catId = categoryComboBox.currentValue !== undefined ? categoryComboBox.currentValue : -1;
-                    Bridge.fetchMinifluxEntries(catId, root.statusIndex);
+                    Bridge.fetchMinifluxEntries(catId, Bridge.lastMinifluxStatusFilter);
                 }
             }
         }
