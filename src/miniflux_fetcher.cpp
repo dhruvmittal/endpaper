@@ -137,7 +137,6 @@ std::future<std::vector<MinifluxEntry>> MinifluxFetcher::fetch_entries(const Fet
             if (!params.search.empty()) {
                 query.addQueryItem("search", QString::fromStdString(params.search));
             }
-            
             url.setQuery(query);
 
             QNetworkAccessManager manager;

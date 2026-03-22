@@ -81,6 +81,22 @@ void Database::init() {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
     )");
+
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS folder_cache (
+            collection_id INTEGER PRIMARY KEY,
+            name          TEXT NOT NULL,
+            full_path    TEXT NOT NULL
+        );
+    )");
+
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS category_cache (
+            id           INTEGER PRIMARY KEY,
+            title        TEXT NOT NULL,
+            unread_count INTEGER NOT NULL DEFAULT 0
+        );
+    )");
 }
 
 // ── Book CRUD ─────────────────────────────────────────────────────────────
@@ -324,6 +340,67 @@ void Database::delete_rss_feed(int64_t feed_id) {
     check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
     sqlite3_bind_int64(sg.stmt, 1, feed_id);
     check(sqlite3_step(sg.stmt), db_, "step");
+}
+
+// ── Cache operations ────────────────────────────────────────────────
+
+void Database::save_folder_cache(const std::vector<FolderInfo>& folders) {
+    exec("DELETE FROM folder_cache;");
+    const char* sql = "INSERT INTO folder_cache (collection_id, name, full_path) VALUES (?, ?, ?);";
+    for (const auto& f : folders) {
+        StmtGuard sg;
+        check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+        sqlite3_bind_int64(sg.stmt, 1, f.collection_id);
+        sqlite3_bind_text(sg.stmt, 2, f.name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(sg.stmt, 3, f.full_path.c_str(), -1, SQLITE_TRANSIENT);
+        check(sqlite3_step(sg.stmt), db_, "step");
+    }
+}
+
+std::vector<FolderInfo> Database::load_folder_cache() {
+    const char* sql = "SELECT collection_id, name, full_path FROM folder_cache ORDER BY full_path;";
+    StmtGuard sg;
+    check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+
+    std::vector<FolderInfo> folders;
+    while (sqlite3_step(sg.stmt) == SQLITE_ROW) {
+        FolderInfo f;
+        f.collection_id = sqlite3_column_int64(sg.stmt, 0);
+        f.name = reinterpret_cast<const char*>(sqlite3_column_text(sg.stmt, 1));
+        f.full_path = reinterpret_cast<const char*>(sqlite3_column_text(sg.stmt, 2));
+        folders.push_back(std::move(f));
+    }
+    return folders;
+}
+
+void Database::save_category_cache(const std::vector<MinifluxCategory>& categories) {
+    exec("DELETE FROM category_cache;");
+    const char* sql = "INSERT INTO category_cache (id, title, unread_count) VALUES (?, ?, ?);";
+    for (const auto& c : categories) {
+        if (c.id == -1) continue; // Skip "All Categories" as it is added at runtime
+        StmtGuard sg;
+        check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+        sqlite3_bind_int64(sg.stmt, 1, c.id);
+        sqlite3_bind_text(sg.stmt, 2, c.title.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(sg.stmt, 3, c.unread_count);
+        check(sqlite3_step(sg.stmt), db_, "step");
+    }
+}
+
+std::vector<MinifluxCategory> Database::load_category_cache() {
+    const char* sql = "SELECT id, title, unread_count FROM category_cache ORDER BY title;";
+    StmtGuard sg;
+    check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+
+    std::vector<MinifluxCategory> categories;
+    while (sqlite3_step(sg.stmt) == SQLITE_ROW) {
+        MinifluxCategory c;
+        c.id = sqlite3_column_int64(sg.stmt, 0);
+        c.title = reinterpret_cast<const char*>(sqlite3_column_text(sg.stmt, 1));
+        c.unread_count = sqlite3_column_int(sg.stmt, 2);
+        categories.push_back(std::move(c));
+    }
+    return categories;
 }
 
 } // namespace endpaper

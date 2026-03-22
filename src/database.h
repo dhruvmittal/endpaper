@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "akonadi_fetcher.h"
+#include "miniflux_fetcher.h"
 
 struct sqlite3;
 
@@ -65,6 +67,13 @@ public:
     void add_rss_feed(const std::string& title, const std::string& url);
     [[nodiscard]] std::vector<RssFeed> list_rss_feeds();
     void delete_rss_feed(int64_t feed_id);
+
+    // ── Cache operations ────────────────────────────────────────────────
+    void save_folder_cache(const std::vector<FolderInfo>& folders);
+    [[nodiscard]] std::vector<FolderInfo> load_folder_cache();
+
+    void save_category_cache(const std::vector<MinifluxCategory>& categories);
+    [[nodiscard]] std::vector<MinifluxCategory> load_category_cache();
 
 private:
     void exec(const std::string& sql);
