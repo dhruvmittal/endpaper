@@ -27,9 +27,13 @@
 
           buildInputs = [
             pkgs.qt6.qtbase
+            pkgs.qt6.qtdeclarative
+            pkgs.qt6.qtsvg
             kde.akonadi
             kde.kmime
             kde.akonadi-mime
+            kde.kirigami
+            kde.kirigami-addons
             pkgs.ftxui
             pkgs.sqlite
             pkgs.libzip
@@ -54,10 +58,14 @@
 
           buildInputs = [
             pkgs.qt6.qtbase
+            pkgs.qt6.qtdeclarative
+            pkgs.qt6.qtsvg
             kde.akonadi
             kde.kmime
             kde.akonadi-mime
             kde.kdepim-runtime   # provides akonadi_serializer_mail plugin
+            kde.kirigami
+            kde.kirigami-addons
             pkgs.ftxui
             pkgs.sqlite
             pkgs.libzip
@@ -77,6 +85,9 @@
             for p in $buildInputs; do
               if [ -d "$p/lib/qt-6/plugins" ]; then
                 export QT_PLUGIN_PATH="$p/lib/qt-6/plugins''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+              fi
+              if [ -d "$p/lib/qt-6/qml" ]; then
+                export QML_IMPORT_PATH="$p/lib/qt-6/qml''${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
               fi
             done
             # Include the NixOS system plugin path (has akonadi_serializer_mail.so)

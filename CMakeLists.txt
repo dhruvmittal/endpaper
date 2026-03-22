@@ -6,8 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ── Qt6 (required by Akonadi + Network for RSS) ──────────────────────────────
-find_package(Qt6 REQUIRED COMPONENTS Core Network)
+# ── Qt6 (required by Akonadi, GUI, Network) ────────────────────────────────
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2)
 set(CMAKE_AUTOMOC ON)
 
 # ── Extra CMake Modules (required by KDE Frameworks) ──────────────────────
@@ -18,6 +18,10 @@ set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH} ${CMAKE_MODULE_PATH})
 find_package(KPim6Mime REQUIRED)
 find_package(KPim6Akonadi REQUIRED)
 find_package(KPim6AkonadiMime REQUIRED)
+
+# ── Kirigami ──────────────────────────────────────────────────────────────
+find_package(KF6 REQUIRED COMPONENTS Kirigami)
+find_package(KF6KirigamiAddons REQUIRED)
 
 # ── FTXUI ──────────────────────────────────────────────────────────────────
 find_package(ftxui REQUIRED)
@@ -81,5 +85,57 @@ if(BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-# ── Install ────────────────────────────────────────────────────────────────
+# ── install ────────────────────────────────────────────────────────────────
 install(TARGETS endpaper DESTINATION bin)
+
+# ── GUI executable ─────────────────────────────────────────────────────────
+
+qt_add_executable(endpaper-qt
+    src/qt_main.cpp
+    src/config.cpp
+    src/database.cpp
+    src/html_sanitizer.cpp
+    src/epub_builder.cpp
+    src/akonadi_fetcher.cpp
+    src/rss_fetcher.cpp
+    src/miniflux_fetcher.cpp
+    src/endpaper_bridge.cpp
+    src/endpaper_bridge.h
+    src/qml_models.h
+)
+
+qt_add_qml_module(endpaper-qt
+    URI "org.kde.endpaper"
+    VERSION 1.0
+    QML_FILES
+        src/qml/main.qml
+        src/qml/Components/ArticleListView.qml
+        src/qml/Pages/SettingsPage.qml
+        src/qml/Pages/IngestPage.qml
+        src/qml/Pages/MinifluxPage.qml
+        src/qml/Pages/RssPage.qml
+        src/qml/Pages/BooksPage.qml
+        src/qml/Pages/BuildPage.qml
+)
+
+target_include_directories(endpaper-qt PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${SQLITE3_INCLUDE_DIRS}
+    ${LIBZIP_INCLUDE_DIRS}
+)
+
+target_link_libraries(endpaper-qt PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2
+    KF6::Kirigami
+    KPim6::Mime KPim6::AkonadiCore KPim6::AkonadiMime
+    pugixml::pugixml
+    ${SQLITE3_LIBRARIES}
+    ${LIBZIP_LIBRARIES}
+)
+
+target_link_directories(endpaper-qt PRIVATE
+    ${SQLITE3_LIBRARY_DIRS}
+    ${LIBZIP_LIBRARY_DIRS}
+)
+
+install(TARGETS endpaper-qt DESTINATION bin)
