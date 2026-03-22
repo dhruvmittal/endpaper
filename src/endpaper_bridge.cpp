@@ -5,6 +5,9 @@
 #include <thread>
 #include <mutex>
 #include <QMetaObject>
+#include <QStandardPaths>
+#include <filesystem>
+#include <iostream>
 
 using namespace endpaper;
 
@@ -450,9 +453,28 @@ void EndpaperBridge::buildEpub(const QString& author, const QString& publisher, 
     std::string outPath = m_config->get("general", "default_folder", "");
     if (!extraPath.isEmpty()) outPath = extraPath.toStdString();
     
-    if (outPath.empty()) outPath = "./";
-    else if (outPath.back() != '/') outPath += "/";
-    outPath += slugify(bookTitle) + ".epub";
+    // 1. Expand tilde
+    if (!outPath.empty() && outPath[0] == '~') {
+        const char* home = std::getenv("HOME");
+        if (home) outPath = std::string(home) + outPath.substr(1);
+    }
+    
+    // 2. Default to Documents if empty
+    if (outPath.empty()) {
+        QString docPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        if (!docPath.isEmpty()) {
+            outPath = docPath.toStdString();
+        } else {
+            outPath = ".";
+        }
+    }
+
+    // 3. Resolve final path: if it's a directory, append slug. If it's a file, keep it.
+    std::filesystem::path p(outPath);
+    if (std::filesystem::is_directory(p) || outPath.back() == '/' || p.extension() != ".epub") {
+        if (!outPath.empty() && outPath.back() != '/') outPath += "/";
+        outPath += slugify(bookTitle) + ".epub";
+    }
     
     std::string stdAuthor = author.toStdString();
     std::string stdPublisher = publisher.toStdString();
