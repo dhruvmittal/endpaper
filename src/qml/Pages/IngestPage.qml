@@ -6,8 +6,10 @@ import org.kde.kirigamiaddons.formcard as FormCard
 import org.kde.endpaper 1.0
 import "../Components" as Components
 
-Kirigami.Page {
+    Kirigami.Page {
     title: "KMail Ingest"
+
+    Component.onCompleted: Bridge.pageOpened("kmail")
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing

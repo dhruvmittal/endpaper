@@ -38,6 +38,10 @@ class EndpaperBridge : public QObject {
 
     Q_PROPERTY(int selectedBookId READ selectedBookId WRITE setSelectedBookId NOTIFY selectedBookIdChanged)
 
+    Q_PROPERTY(bool autoFetchKMail READ autoFetchKMail WRITE setAutoFetchKMail NOTIFY autoFetchKMailChanged)
+    Q_PROPERTY(bool autoFetchMiniflux READ autoFetchMiniflux WRITE setAutoFetchMiniflux NOTIFY autoFetchMinifluxChanged)
+    Q_PROPERTY(bool cacheMetadata READ cacheMetadata WRITE setCacheMetadata NOTIFY cacheMetadataChanged)
+
 public:
     explicit EndpaperBridge(QObject* parent = nullptr);
     ~EndpaperBridge() override;
@@ -101,6 +105,15 @@ public:
     Q_INVOKABLE void moveChapterDown(int chapterId);
     Q_INVOKABLE void buildEpub(const QString& author, const QString& publisher, const QString& outPath, bool append, bool simplify);
 
+    Q_INVOKABLE void pageOpened(const QString& pageName);
+
+    bool autoFetchKMail() const;
+    void setAutoFetchKMail(bool enabled);
+    bool autoFetchMiniflux() const;
+    void setAutoFetchMiniflux(bool enabled);
+    bool cacheMetadata() const;
+    void setCacheMetadata(bool enabled);
+
 private:
     void setStatus(const QString& msg);
     void setBusy(bool busy);
@@ -132,6 +145,9 @@ signals:
     void statusMessageChanged();
     void isBusyChanged();
     void selectedBookIdChanged();
+    void autoFetchKMailChanged();
+    void autoFetchMinifluxChanged();
+    void cacheMetadataChanged();
 };
 
 } // namespace endpaper

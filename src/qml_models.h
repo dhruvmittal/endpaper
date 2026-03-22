@@ -71,6 +71,8 @@ public:
         endResetModel();
     }
 
+    const std::vector<FolderInfo>& getFolders() const { return m_folders; }
+
     int rowCount(const QModelIndex& parent = QModelIndex()) const override {
         if (parent.isValid()) return 0;
         return static_cast<int>(m_folders.size());
@@ -222,6 +224,8 @@ public:
         m_categories = categories;
         endResetModel();
     }
+
+    const std::vector<MinifluxCategory>& getCategories() const { return m_categories; }
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override {
         if (parent.isValid()) return 0;

@@ -31,6 +31,33 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormHeader {
+            title: "Automation & Caching"
+        }
+
+        FormCard.FormCard {
+            FormCard.FormSwitchDelegate {
+                text: "Auto-fetch KMail Folders"
+                description: "Fetch folders automatically when KMail tab is opened"
+                checked: Bridge.autoFetchKMail
+                onToggled: Bridge.autoFetchKMail = checked
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormSwitchDelegate {
+                text: "Auto-fetch Miniflux Categories"
+                description: "Fetch categories automatically when Miniflux tab is opened"
+                checked: Bridge.autoFetchMiniflux
+                onToggled: Bridge.autoFetchMiniflux = checked
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormSwitchDelegate {
+                text: "Cache Metadata"
+                description: "Persist folders and categories between sessions for instant loading"
+                checked: Bridge.cacheMetadata
+                onToggled: Bridge.cacheMetadata = checked
+            }
+        }
+
+        FormCard.FormHeader {
             title: "System"
         }
 

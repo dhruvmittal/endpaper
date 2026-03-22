@@ -39,7 +39,28 @@ void EndpaperBridge::init(Config* config, Database* db, AkonadiFetcher* fetcher,
     m_fetcher = fetcher;
     m_rssFetcher = rssFetcher;
     m_minifluxFetcher = minifluxFetcher;
-    
+
+    if (cacheMetadata()) {
+        m_folderModel->setFolders(m_db->load_folder_cache());
+
+        auto cats = m_db->load_category_cache();
+        if (!cats.empty()) {
+            std::vector<MinifluxCategory> allCats;
+            MinifluxCategory all;
+            all.id = -1;
+            all.title = "All Categories";
+            all.unread_count = 0;
+            for (const auto& cat : cats) {
+                all.unread_count += cat.unread_count;
+            }
+            allCats.push_back(all);
+            for (auto& cat : cats) {
+                allCats.push_back(std::move(cat));
+            }
+            m_minifluxCategoryModel->setCategories(allCats);
+        }
+    }
+
     refreshBooks();
     fetchRssFeeds();
 }
@@ -152,8 +173,24 @@ void EndpaperBridge::fetchFolders() {
             auto fut = m_fetcher->fetch_folders();
             auto folders = fut.get();
             QMetaObject::invokeMethod(this, [this, f = std::move(folders)]() {
-                m_folderModel->setFolders(f);
-                setStatus(QString("Loaded %1 folders").arg(f.size()));
+                auto current = m_folderModel->getFolders(); // Assuming I add getFolders() to FolderModel
+                bool changed = (f.size() != current.size());
+                if (!changed) {
+                    for (size_t i = 0; i < f.size(); ++i) {
+                        if (f[i].collection_id != current[i].collection_id || f[i].full_path != current[i].full_path) {
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (changed) {
+                    m_folderModel->setFolders(f);
+                    if (cacheMetadata()) m_db->save_folder_cache(f);
+                    setStatus("KMail folders updated.");
+                } else {
+                    setStatus("");
+                }
                 setBusy(false);
             });
         } catch (const std::exception& e) {
@@ -244,9 +281,43 @@ void EndpaperBridge::fetchMinifluxCategories() {
         try {
             auto fut = m_minifluxFetcher->fetch_categories();
             auto cats = fut.get();
-            QMetaObject::invokeMethod(this, [this, c = std::move(cats)]() {
-                m_minifluxCategoryModel->setCategories(c);
-                setStatus(QString("Loaded %1 Miniflux categories").arg(c.size()));
+            QMetaObject::invokeMethod(this, [this, c = std::move(cats)]() mutable {
+                std::vector<MinifluxCategory> allCats;
+                MinifluxCategory all;
+                all.id = -1;
+                all.title = "All Categories";
+                all.unread_count = 0;
+                for (const auto& cat : c) {
+                    all.unread_count += cat.unread_count;
+                }
+                allCats.push_back(all);
+                for (const auto& cat : c) {
+                    allCats.push_back(cat);
+                }
+
+                const auto& currentWrapped = m_minifluxCategoryModel->getCategories(); 
+                std::vector<MinifluxCategory> current;
+                if (currentWrapped.size() > 0) {
+                    for(size_t i = 1; i < currentWrapped.size(); ++i) current.push_back(currentWrapped[i]);
+                }
+
+                bool changed = (c.size() != current.size());
+                if (!changed) {
+                    for (size_t i = 0; i < c.size(); ++i) {
+                        if (c[i].id != current[i].id || c[i].title != current[i].title || c[i].unread_count != current[i].unread_count) {
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (changed) {
+                    m_minifluxCategoryModel->setCategories(allCats);
+                    if (cacheMetadata()) m_db->save_category_cache(c);
+                    setStatus("Miniflux categories updated.");
+                } else {
+                    setStatus("");
+                }
                 setBusy(false);
             });
         } catch (const std::exception& e) {
@@ -273,7 +344,7 @@ void EndpaperBridge::fetchMinifluxEntries(int categoryId, int statusFilter) {
     setStatus("Fetching Miniflux entries...");
     
     MinifluxFetcher::FetchParams p;
-    p.category_id = categoryId > 0 ? categoryId : -1;
+    p.category_id = categoryId;
     if (statusFilter == 0) p.status = "unread";
     else if (statusFilter == 1) p.starred = true;
     
@@ -510,3 +581,42 @@ void EndpaperBridge::buildEpub(const QString& author, const QString& publisher, 
         }
     }).detach();
 }
+
+void EndpaperBridge::pageOpened(const QString& pageName) {
+    if (pageName == "kmail" && autoFetchKMail()) {
+        fetchFolders();
+    } else if (pageName == "miniflux" && autoFetchMiniflux()) {
+        fetchMinifluxCategories();
+    }
+}
+
+bool EndpaperBridge::autoFetchKMail() const {
+    return m_config->get("general", "auto_fetch_kmail", "false") == "true";
+}
+
+void EndpaperBridge::setAutoFetchKMail(bool enabled) {
+    m_config->set("general", "auto_fetch_kmail", enabled ? "true" : "false");
+    m_config->save();
+    emit autoFetchKMailChanged();
+}
+
+bool EndpaperBridge::autoFetchMiniflux() const {
+    return m_config->get("general", "auto_fetch_miniflux", "false") == "true";
+}
+
+void EndpaperBridge::setAutoFetchMiniflux(bool enabled) {
+    m_config->set("general", "auto_fetch_miniflux", enabled ? "true" : "false");
+    m_config->save();
+    emit autoFetchMinifluxChanged();
+}
+
+bool EndpaperBridge::cacheMetadata() const {
+    return m_config->get("general", "cache_metadata", "true") == "true";
+}
+
+void EndpaperBridge::setCacheMetadata(bool enabled) {
+    m_config->set("general", "cache_metadata", enabled ? "true" : "false");
+    m_config->save();
+    emit cacheMetadataChanged();
+}
+

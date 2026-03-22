@@ -10,6 +10,8 @@ Kirigami.Page {
     id: root
     title: "Miniflux Ingest"
     
+    Component.onCompleted: Bridge.pageOpened("miniflux")
+    
     property int statusIndex: 0
 
     ColumnLayout {
