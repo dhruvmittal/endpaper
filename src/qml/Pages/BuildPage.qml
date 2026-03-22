@@ -31,6 +31,7 @@ Kirigami.ScrollablePage {
                 model: Bridge.bookModel
                 textRole: "title"
                 valueRole: "id"
+                currentIndex: Bridge.bookModel.indexOf(Bridge.selectedBookId)
                 onCurrentValueChanged: {
                     if (currentValue !== undefined) {
                         Bridge.selectedBookId = currentValue

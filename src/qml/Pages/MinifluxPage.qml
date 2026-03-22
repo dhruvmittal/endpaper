@@ -113,7 +113,7 @@ Kirigami.Page {
                 model: Bridge.bookModel
                 textRole: "title"
                 valueRole: "id"
-                currentIndex: indexOfValue(Bridge.selectedBookId)
+                currentIndex: Bridge.bookModel.indexOf(Bridge.selectedBookId)
                 onActivated: Bridge.selectedBookId = currentValue
             }
             Controls.Button {

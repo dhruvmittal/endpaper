@@ -41,6 +41,13 @@ public:
         return QVariant();
     }
 
+    Q_INVOKABLE int indexOf(int bookId) const {
+        for (int i = 0; i < static_cast<int>(m_books.size()); ++i) {
+            if (m_books[i].id == bookId) return i;
+        }
+        return -1;
+    }
+
     QHash<int, QByteArray> roleNames() const override {
         return { {IdRole, "id"}, {TitleRole, "title"}, {CreatedAtRole, "createdAt"} };
     }
