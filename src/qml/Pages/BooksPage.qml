@@ -68,8 +68,21 @@ Kirigami.ScrollablePage {
             }
         }
 
-        FormCard.FormHeader {
-            title: "Chapters in Book"
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.rightMargin: Kirigami.Units.largeSpacing
+            
+            FormCard.FormHeader {
+                title: "Chapters in Book"
+                Layout.fillWidth: true
+            }
+            
+            Controls.ToolButton {
+                icon.name: "media-playlist-reverse"
+                onClicked: Bridge.reverseChapterOrder()
+                ToolTip.visible: hovered
+                ToolTip.text: "Reverse all chapters"
+            }
         }
 
         ListView {

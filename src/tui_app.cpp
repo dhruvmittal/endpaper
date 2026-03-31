@@ -446,6 +446,7 @@ void TuiApp::run() {
         status_message = "Staged " + std::to_string(staged) + " emails";
         email_selected.assign(emails.size(), false);
         apply_email_filter();
+        db_.renumber_chapters(book_id);
         refresh_chapters();
     });
 
@@ -637,6 +638,7 @@ void TuiApp::run() {
                 status_message = "✓ Staged " + std::to_string(staged) + " entries";
                 miniflux_selected.assign(miniflux_entries.size(), false);
                 apply_miniflux_filter();
+                db_.renumber_chapters(book_id);
                 refresh_chapters();
             }
             loading_miniflux_entries = false;
@@ -780,6 +782,7 @@ void TuiApp::run() {
         status_message = "Staged " + std::to_string(staged) + " articles";
         rss_selected.assign(rss_articles.size(), false);
         apply_rss_filter();
+        db_.renumber_chapters(book_id);
         refresh_chapters();
     });
 
@@ -877,7 +880,26 @@ void TuiApp::run() {
     book_menu_option.on_change = [&] { refresh_chapters(); };
     auto book_menu = Menu(&book_labels, &book_selected, book_menu_option);
     book_menu->TakeFocus();
-    auto chapter_menu = Menu(&chapter_labels, &chapter_selected);
+
+    auto chapter_menu_option = MenuOption::Vertical();
+    chapter_menu_option.on_enter = [&] {
+        if (!chapters.empty()) {
+            db_.reverse_chapter_order(books[book_selected].id);
+            refresh_chapters();
+        }
+    };
+    auto chapter_menu = Menu(&chapter_labels, &chapter_selected, chapter_menu_option);
+
+    auto chapter_menu_wrapper = CatchEvent(chapter_menu, [&](Event e) {
+        if (e == Event::Character('r') || e == Event::Character('R')) {
+            if (!books.empty() && book_selected >= 0) {
+                db_.reverse_chapter_order(books[book_selected].id);
+                refresh_chapters();
+                return true;
+            }
+        }
+        return chapter_menu->OnEvent(e);
+    });
 
     auto btn_create_book = Button("+ Create Book", [&] {
         if (new_book_title.empty()) return;
@@ -894,6 +916,7 @@ void TuiApp::run() {
         int i = chapter_selected;
         db_.update_sort_order(chapters[i].id, chapters[i-1].sort_order);
         db_.update_sort_order(chapters[i-1].id, chapters[i].sort_order);
+        db_.renumber_chapters(books[book_selected].id);
         chapter_selected--; refresh_chapters();
     });
 
@@ -902,17 +925,26 @@ void TuiApp::run() {
         int i = chapter_selected;
         db_.update_sort_order(chapters[i].id, chapters[i+1].sort_order);
         db_.update_sort_order(chapters[i+1].id, chapters[i].sort_order);
+        db_.renumber_chapters(books[book_selected].id);
         chapter_selected++; refresh_chapters();
     });
 
     auto btn_delete_chapter = Button("✕ Remove", [&] {
         if (chapters.empty()) return;
-        db_.delete_chapter(chapters[chapter_selected].id); refresh_chapters(); status_message = "Chapter removed";
+        db_.delete_chapter(chapters[chapter_selected].id);
+        db_.renumber_chapters(books[book_selected].id);
+        refresh_chapters(); status_message = "Chapter removed";
+    });
+
+    auto btn_reverse_chapters = Button("⇅ Reverse", [&] {
+        if (books.empty()) return;
+        db_.reverse_chapter_order(books[book_selected].id);
+        refresh_chapters(); status_message = "Order reversed";
     });
 
     auto books_tab = Container::Horizontal({
         Container::Vertical({book_menu, Container::Horizontal({Input(&new_book_title, "New Book"), btn_create_book}), btn_delete_book}),
-        Container::Vertical({chapter_menu, Container::Horizontal({btn_move_up, btn_move_down, btn_delete_chapter})})
+        Container::Vertical({chapter_menu_wrapper, Container::Horizontal({btn_move_up, btn_move_down, btn_reverse_chapters, btn_delete_chapter})})
     });
 
     auto books_renderer = Renderer(books_tab, [&] {

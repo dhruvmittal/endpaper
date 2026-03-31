@@ -51,21 +51,16 @@ int main(int argc, char* argv[]) {
     for (const QString& path : qmlPathEnv.split(':', Qt::SkipEmptyParts)) {
         engine.addImportPath(path);
     }
+    const QString qml2PathEnv = qEnvironmentVariable("QML2_IMPORT_PATH");
+    for (const QString& path : qml2PathEnv.split(':', Qt::SkipEmptyParts)) {
+        engine.addImportPath(path);
+    }
     
     // Instantiate Bridge as singleton (injected into context here as a simple property since we create the instance)
-    // Wait, since we marked it as QML_SINGLETON, we could just let QML register it. 
-    // But we need to inject dependencies. The best way is to instantiate it, init it, and set it as context property or use qmlRegisterSingletonInstance.
     endpaper::EndpaperBridge bridge;
     bridge.init(&config, &db, &fetcher, &rss_fetcher, &miniflux_fetcher);
     
     engine.rootContext()->setContextProperty("Bridge", &bridge);
-
-    QDirIterator it(":", QDirIterator::Subdirectories);
-    qDebug() << "--- Available QRC Paths ---";
-    while (it.hasNext()) {
-        qDebug() << it.next();
-    }
-    qDebug() << "---------------------------";
 
     const QUrl url_main("qrc:/org/kde/endpaper/src/qml/main.qml");
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,

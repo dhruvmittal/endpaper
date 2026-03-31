@@ -19,9 +19,7 @@ find_package(KPim6Mime REQUIRED)
 find_package(KPim6Akonadi REQUIRED)
 find_package(KPim6AkonadiMime REQUIRED)
 
-# ── Kirigami ──────────────────────────────────────────────────────────────
-find_package(KF6 REQUIRED COMPONENTS Kirigami)
-find_package(KF6KirigamiAddons REQUIRED)
+# ── Kirigami (runtime-only, discovered via QML2_IMPORT_PATH) ──────────────
 
 # ── FTXUI ──────────────────────────────────────────────────────────────────
 find_package(ftxui REQUIRED)
@@ -126,7 +124,6 @@ target_include_directories(endpaper-qt PRIVATE
 
 target_link_libraries(endpaper-qt PRIVATE
     Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2
-    KF6::Kirigami
     KPim6::Mime KPim6::AkonadiCore KPim6::AkonadiMime
     pugixml::pugixml
     ${SQLITE3_LIBRARIES}

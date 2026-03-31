@@ -71,3 +71,22 @@ target_link_directories(test_append_comprehensive PRIVATE
 )
 target_compile_options(test_append_comprehensive PRIVATE -Wall -Wextra)
 add_test(NAME test_append_comprehensive COMMAND test_append_comprehensive)
+# ── Test: Database Books ───────────────────────────────────────────────────
+add_executable(test_database_books
+    test_database_books.cpp
+    ${CMAKE_SOURCE_DIR}/src/database.cpp
+    ${CMAKE_SOURCE_DIR}/src/config.cpp
+)
+target_include_directories(test_database_books PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${SQLITE3_INCLUDE_DIRS}
+)
+target_link_libraries(test_database_books PRIVATE
+    ${SQLITE3_LIBRARIES}
+    Qt6::Core
+)
+target_link_directories(test_database_books PRIVATE
+    ${SQLITE3_LIBRARY_DIRS}
+)
+target_compile_options(test_database_books PRIVATE -Wall -Wextra)
+add_test(NAME test_database_books COMMAND test_database_books)

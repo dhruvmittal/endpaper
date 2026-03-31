@@ -141,6 +141,7 @@ void EndpaperBridge::refreshChapters() {
 void EndpaperBridge::deleteChapter(qint64 chapterId) {
     if (!m_db) return;
     m_db->delete_chapter(chapterId);
+    if (m_selectedBookId != -1) m_db->renumber_chapters(m_selectedBookId);
     refreshChapters();
 }
 
@@ -153,6 +154,7 @@ void EndpaperBridge::moveChapterUp(qint64 chapterId) {
             int newOrder = chaps[i-1].sort_order;
             m_db->update_sort_order(chaps[i].id, newOrder);
             m_db->update_sort_order(chaps[i-1].id, oldOrder);
+            m_db->renumber_chapters(m_selectedBookId);
             refreshChapters();
             break;
         }
@@ -168,10 +170,17 @@ void EndpaperBridge::moveChapterDown(qint64 chapterId) {
             int newOrder = chaps[i+1].sort_order;
             m_db->update_sort_order(chaps[i].id, newOrder);
             m_db->update_sort_order(chaps[i+1].id, oldOrder);
+            m_db->renumber_chapters(m_selectedBookId);
             refreshChapters();
             break;
         }
     }
+}
+
+void EndpaperBridge::reverseChapterOrder() {
+    if (!m_db || m_selectedBookId == -1) return;
+    m_db->reverse_chapter_order(m_selectedBookId);
+    refreshChapters();
 }
 
 void EndpaperBridge::fetchFolders() {
@@ -271,6 +280,7 @@ void EndpaperBridge::stageSelectedEmails() {
     
     setStatus(QString("Staged %1 emails").arg(staged));
     m_emailModel->deselectAll();
+    m_db->renumber_chapters(m_selectedBookId);
     refreshChapters();
 }
 
@@ -404,6 +414,7 @@ void EndpaperBridge::stageSelectedMiniflux() {
     
     setStatus(QString("Staged %1 Miniflux entries").arg(staged));
     m_minifluxEntryModel->deselectAll();
+    m_db->renumber_chapters(m_selectedBookId);
     refreshChapters();
 }
 
@@ -492,6 +503,7 @@ void EndpaperBridge::stageSelectedRss() {
     
     setStatus(QString("Staged %1 RSS entries").arg(staged));
     m_rssEntryModel->deselectAll();
+    m_db->renumber_chapters(m_selectedBookId);
     refreshChapters();
 }
 
