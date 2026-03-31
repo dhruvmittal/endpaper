@@ -50,3 +50,24 @@ target_link_directories(test_rss PRIVATE
 )
 target_compile_options(test_rss PRIVATE -Wall -Wextra)
 add_test(NAME test_rss COMMAND test_rss)
+# ── Test: Comprehensive Append ─────────────────────────────────────────────
+add_executable(test_append_comprehensive
+    test_append_comprehensive.cpp
+    ${CMAKE_SOURCE_DIR}/src/epub_builder.cpp
+    ${CMAKE_SOURCE_DIR}/src/html_sanitizer.cpp
+)
+target_include_directories(test_append_comprehensive PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${LIBZIP_INCLUDE_DIRS}
+    ${SQLITE3_INCLUDE_DIRS}
+)
+target_link_libraries(test_append_comprehensive PRIVATE
+    ${LIBZIP_LIBRARIES}
+    ${SQLITE3_LIBRARIES}
+)
+target_link_directories(test_append_comprehensive PRIVATE
+    ${LIBZIP_LIBRARY_DIRS}
+    ${SQLITE3_LIBRARY_DIRS}
+)
+target_compile_options(test_append_comprehensive PRIVATE -Wall -Wextra)
+add_test(NAME test_append_comprehensive COMMAND test_append_comprehensive)
