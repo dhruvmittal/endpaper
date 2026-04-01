@@ -27,9 +27,9 @@
           ];
 
           buildInputs = [
-            pkgs.qt6.qtbase
-            pkgs.qt6.qtdeclarative
-            pkgs.qt6.qtsvg
+            kde.qtbase
+            kde.qtdeclarative
+            kde.qtsvg
             kde.akonadi
             kde.kmime
             kde.akonadi-mime
@@ -38,6 +38,7 @@
             kde.breeze
             kde.qqc2-desktop-style
             kde.plasma-integration
+            kde.kdepim-runtime   # provides akonadi_serializer_mail plugin
             pkgs.ftxui
             pkgs.sqlite
             pkgs.libzip
@@ -58,10 +59,12 @@
                 --prefix QML2_IMPORT_PATH : "${kde.kirigami}/lib/qt-6/qml" \
                 --prefix QML2_IMPORT_PATH : "${kde.kirigami-addons}/lib/qt-6/qml" \
                 --prefix QML2_IMPORT_PATH : "${kde.qqc2-desktop-style}/lib/qt-6/qml" \
-                --prefix QML2_IMPORT_PATH : "${pkgs.qt6.qtdeclarative}/lib/qt-6/qml" \
-                --prefix QT_PLUGIN_PATH : "${pkgs.qt6.qtbase}/lib/qt-6/plugins" \
+                --prefix QML2_IMPORT_PATH : "${kde.qtdeclarative}/lib/qt-6/qml" \
+                --prefix QT_PLUGIN_PATH : "${kde.qtbase}/lib/qt-6/plugins" \
                 --prefix QT_PLUGIN_PATH : "${kde.plasma-integration}/lib/qt-6/plugins" \
+                --prefix QT_PLUGIN_PATH : "${kde.breeze}/lib/qt-6/plugins" \
                 --prefix XDG_DATA_DIRS : "${kde.kirigami}/share" \
+                --prefix XDG_DATA_DIRS : "${pkgs.kdePackages.breeze-icons}/share" \
                 --prefix XDG_DATA_DIRS : "$out/share" \
                 --set QT_QPA_PLATFORMTHEME "kde"
             done
@@ -79,10 +82,10 @@
 
           # Ensure QML modules and plugins are found at runtime during development
           # These are picked up by nix develop --command as well
-          QML_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with pkgs; [ qt6.qtdeclarative kde.kirigami kde.kirigami-addons kde.qqc2-desktop-style ]);
-          QML2_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with pkgs; [ qt6.qtdeclarative kde.kirigami kde.kirigami-addons kde.qqc2-desktop-style ]);
-          QT_PLUGIN_PATH = pkgs.lib.makeSearchPath "lib/qt-6/plugins" (with pkgs; [ qt6.qtbase kde.akonadi-mime kde.plasma-integration ]);
-          XDG_DATA_DIRS = pkgs.lib.makeSearchPath "share" (with pkgs; [ kde.kirigami ]);
+          QML_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with kde; [ qtdeclarative kirigami kirigami-addons qqc2-desktop-style ]);
+          QML2_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with kde; [ qtdeclarative kirigami kirigami-addons qqc2-desktop-style ]);
+          QT_PLUGIN_PATH = pkgs.lib.makeSearchPath "lib/qt-6/plugins" (with kde; [ qtbase akonadi-mime plasma-integration breeze ]);
+          XDG_DATA_DIRS = pkgs.lib.makeSearchPath "share" (with kde; [ kirigami breeze-icons ]);
           QT_QPA_PLATFORMTHEME = "kde";
 
           shellHook = ''

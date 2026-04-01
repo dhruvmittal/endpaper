@@ -102,10 +102,9 @@ qt_add_executable(endpaper-qt
     src/qml_models.h
 )
 
-qt_add_qml_module(endpaper-qt
-    URI "org.kde.endpaper"
-    VERSION 1.0
-    QML_FILES
+qt_add_resources(endpaper-qt "qml"
+    PREFIX "/org/kde/endpaper/"
+    FILES
         src/qml/main.qml
         src/qml/Components/ArticleListView.qml
         src/qml/Pages/SettingsPage.qml

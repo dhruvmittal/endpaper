@@ -47,13 +47,11 @@ int main(int argc, char* argv[]) {
     QQmlApplicationEngine engine;
     
     // Explicitly add QML_IMPORT_PATHs from the environment
-    const QString qmlPathEnv = qEnvironmentVariable("QML_IMPORT_PATH");
-    for (const QString& path : qmlPathEnv.split(':', Qt::SkipEmptyParts)) {
-        engine.addImportPath(path);
-    }
-    const QString qml2PathEnv = qEnvironmentVariable("QML2_IMPORT_PATH");
-    for (const QString& path : qml2PathEnv.split(':', Qt::SkipEmptyParts)) {
-        engine.addImportPath(path);
+    for (const char* envName : {"QML_IMPORT_PATH", "QML2_IMPORT_PATH"}) {
+        const QString qmlPathEnv = qEnvironmentVariable(envName);
+        for (const QString& path : qmlPathEnv.split(':', Qt::SkipEmptyParts)) {
+            engine.addImportPath(path);
+        }
     }
     
     // Instantiate Bridge as singleton (injected into context here as a simple property since we create the instance)

@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.endpaper 1.0
 
-Controls.ApplicationWindow {
+Kirigami.ApplicationWindow {
     id: root
 
     title: "Endpaper"
