@@ -80,8 +80,8 @@ Kirigami.ScrollablePage {
             Controls.ToolButton {
                 icon.name: "media-playlist-reverse"
                 onClicked: Bridge.reverseChapterOrder()
-                ToolTip.visible: hovered
-                ToolTip.text: "Reverse all chapters"
+                Controls.ToolTip.visible: hovered
+                Controls.ToolTip.text: "Reverse all chapters"
             }
         }
 

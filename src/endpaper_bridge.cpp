@@ -147,6 +147,7 @@ void EndpaperBridge::deleteChapter(qint64 chapterId) {
 
 void EndpaperBridge::moveChapterUp(qint64 chapterId) {
     if (!m_db || m_selectedBookId == -1) return;
+    qDebug() << "Moving chapter up:" << chapterId << "in book" << m_selectedBookId;
     auto chaps = m_db->get_chapters(m_selectedBookId);
     for (size_t i = 1; i < chaps.size(); ++i) {
         if (chaps[i].id == chapterId) {
@@ -163,6 +164,7 @@ void EndpaperBridge::moveChapterUp(qint64 chapterId) {
 
 void EndpaperBridge::moveChapterDown(qint64 chapterId) {
     if (!m_db || m_selectedBookId == -1) return;
+    qDebug() << "Moving chapter down:" << chapterId << "in book" << m_selectedBookId;
     auto chaps = m_db->get_chapters(m_selectedBookId);
     for (size_t i = 0; i < chaps.size(); ++i) {
         if (i < chaps.size() - 1 && chaps[i].id == chapterId) {
@@ -179,7 +181,9 @@ void EndpaperBridge::moveChapterDown(qint64 chapterId) {
 
 void EndpaperBridge::reverseChapterOrder() {
     if (!m_db || m_selectedBookId == -1) return;
+    qDebug() << "Reversing chapters in book" << m_selectedBookId;
     m_db->reverse_chapter_order(m_selectedBookId);
+    m_db->renumber_chapters(m_selectedBookId);
     refreshChapters();
 }
 

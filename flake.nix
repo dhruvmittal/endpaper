@@ -35,6 +35,7 @@
             kde.akonadi-mime
             kde.kirigami
             kde.kirigami-addons
+            kde.ki18n
             kde.breeze
             kde.qqc2-desktop-style
             kde.plasma-integration

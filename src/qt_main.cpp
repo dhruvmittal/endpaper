@@ -13,6 +13,9 @@
 #include <QDirIterator>
 #include <QDebug>
 
+#include <KLocalizedContext>
+#include <KLocalizedString>
+
 int main(int argc, char* argv[]) {
     // Enable High DPI Support
     QGuiApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
@@ -23,6 +26,8 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName("Endpaper");
     app.setOrganizationDomain("endpaper.local");
     app.setApplicationVersion("0.1.0");
+
+    KLocalizedString::setApplicationDomain("endpaper-qt");
 
     // Use Breeze style by default for Kirigami if not set
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) {
@@ -45,6 +50,7 @@ int main(int argc, char* argv[]) {
 
     // QML Engine setup
     QQmlApplicationEngine engine;
+    engine.rootContext()->setContextObject(new KLocalizedContext(&engine));
     
     // Explicitly add QML_IMPORT_PATHs from the environment
     for (const char* envName : {"QML_IMPORT_PATH", "QML2_IMPORT_PATH"}) {
