@@ -45,6 +45,7 @@ set(ENDPAPER_SOURCES
     src/akonadi_fetcher.cpp
     src/rss_fetcher.cpp
     src/miniflux_fetcher.cpp
+    src/html_extractor.cpp
     src/tui_app.cpp
 )
 
@@ -98,6 +99,7 @@ qt_add_executable(endpaper-qt
     src/akonadi_fetcher.cpp
     src/rss_fetcher.cpp
     src/miniflux_fetcher.cpp
+    src/html_extractor.cpp
     src/endpaper_bridge.cpp
     src/endpaper_bridge.h
     src/qml_models.h
@@ -135,5 +137,10 @@ target_link_directories(endpaper-qt PRIVATE
     ${SQLITE3_LIBRARY_DIRS}
     ${LIBZIP_LIBRARY_DIRS}
 )
+
+# ── Unit tests ─────────────────────────────────────────────────────────────
+add_executable(test_html_extractor tests/test_html_extractor.cpp src/html_extractor.cpp)
+target_link_libraries(test_html_extractor PRIVATE Qt6::Core Qt6::Network)
+target_include_directories(test_html_extractor PRIVATE src)
 
 install(TARGETS endpaper-qt DESTINATION bin)

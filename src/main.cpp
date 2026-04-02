@@ -3,6 +3,7 @@
 #include "database.h"
 #include "rss_fetcher.h"
 #include "miniflux_fetcher.h"
+#include "html_extractor.h"
 #include "tui_app.h"
 
 #include <QCoreApplication>
@@ -69,6 +70,7 @@ int main(int argc, char* argv[]) {
         endpaper::AkonadiFetcher fetcher;
         endpaper::RssFetcher rss_fetcher;
         endpaper::MinifluxFetcher miniflux_fetcher;
+        endpaper::HtmlExtractor html_extractor;
 
         if (!fetcher.is_available()) {
             std::cerr << "⚠ Warning: Akonadi server is not running.\n"
@@ -80,7 +82,7 @@ int main(int argc, char* argv[]) {
         }
 
         // 6. Launch TUI
-        endpaper::TuiApp app(config, db, fetcher, rss_fetcher, miniflux_fetcher);
+        endpaper::TuiApp app(config, db, fetcher, rss_fetcher, miniflux_fetcher, html_extractor);
         app.run();
 
         return 0;

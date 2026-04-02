@@ -52,6 +52,28 @@ std::string Config::get(const std::string& section, const std::string& key,
     return kit->second;
 }
 
+int Config::get_int(const std::string& section, const std::string& key,
+                    int default_val) const {
+    std::string val = get(section, key);
+    if (val.empty()) return default_val;
+    try {
+        return std::stoi(val);
+    } catch (...) {
+        return default_val;
+    }
+}
+
+bool Config::get_bool(const std::string& section, const std::string& key,
+                     bool default_val) const {
+    std::string val = get(section, key);
+    if (val.empty()) return default_val;
+    std::string lower = val;
+    for (char& c : lower) c = std::tolower(c);
+    if (lower == "true" || lower == "yes" || lower == "1") return true;
+    if (lower == "false" || lower == "no" || lower == "0") return false;
+    return default_val;
+}
+
 void Config::set(const std::string& section, const std::string& key,
                  const std::string& value) {
     values_[section][key] = value;

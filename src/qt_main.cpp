@@ -3,6 +3,7 @@
 #include "akonadi_fetcher.h"
 #include "rss_fetcher.h"
 #include "miniflux_fetcher.h"
+#include "html_extractor.h"
 #include "endpaper_bridge.h"
 
 #include <QGuiApplication>
@@ -42,6 +43,7 @@ int main(int argc, char* argv[]) {
     endpaper::AkonadiFetcher fetcher;
     endpaper::RssFetcher rss_fetcher;
     endpaper::MinifluxFetcher miniflux_fetcher;
+    endpaper::HtmlExtractor html_extractor;
     
     // Set Miniflux credentials if present
     std::string url = config.get("miniflux", "url", "");
@@ -62,7 +64,7 @@ int main(int argc, char* argv[]) {
     
     // Instantiate Bridge as singleton (injected into context here as a simple property since we create the instance)
     endpaper::EndpaperBridge bridge;
-    bridge.init(&config, &db, &fetcher, &rss_fetcher, &miniflux_fetcher);
+    bridge.init(&config, &db, &fetcher, &rss_fetcher, &miniflux_fetcher, &html_extractor);
     
     engine.rootContext()->setContextProperty("Bridge", &bridge);
 

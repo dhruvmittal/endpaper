@@ -16,6 +16,8 @@
 
 namespace endpaper {
 
+class HtmlExtractor;
+
 class EndpaperBridge : public QObject {
     Q_OBJECT
     QML_ELEMENT
@@ -48,13 +50,16 @@ class EndpaperBridge : public QObject {
     Q_PROPERTY(qint64 lastMinifluxCategoryId READ lastMinifluxCategoryId WRITE setLastMinifluxCategoryId NOTIFY lastMinifluxCategoryIdChanged)
     Q_PROPERTY(int lastMinifluxStatusFilter READ lastMinifluxStatusFilter WRITE setLastMinifluxStatusFilter NOTIFY lastMinifluxStatusFilterChanged)
     Q_PROPERTY(qint64 lastRssFeedId READ lastRssFeedId WRITE setLastRssFeedId NOTIFY lastRssFeedIdChanged)
+    Q_PROPERTY(bool resolveStubs READ resolveStubs WRITE setResolveStubs NOTIFY resolveStubsChanged)
+    Q_PROPERTY(int stubThreshold READ stubThreshold WRITE setStubThreshold NOTIFY stubThresholdChanged)
+    Q_PROPERTY(int requestDelayMs READ requestDelayMs WRITE setRequestDelayMs NOTIFY requestDelayMsChanged)
 
 public:
     explicit EndpaperBridge(QObject* parent = nullptr);
     ~EndpaperBridge() override;
 
     // Must be called after instantiation to inject dependencies
-    void init(Config* config, Database* db, AkonadiFetcher* fetcher, RssFetcher* rssFetcher, MinifluxFetcher* minifluxFetcher);
+    void init(Config* config, Database* db, AkonadiFetcher* fetcher, RssFetcher* rssFetcher, MinifluxFetcher* minifluxFetcher, HtmlExtractor* htmlExtractor);
 
     QString statusMessage() const;
     bool isBusy() const;
@@ -135,6 +140,15 @@ public:
     qint64 lastRssFeedId() const;
     void setLastRssFeedId(qint64 id);
 
+    bool resolveStubs() const;
+    void setResolveStubs(bool resolve);
+
+    int stubThreshold() const;
+    void setStubThreshold(int threshold);
+
+    int requestDelayMs() const;
+    void setRequestDelayMs(int ms);
+
 private:
     void setStatus(const QString& msg);
     void setBusy(bool busy);
@@ -161,6 +175,7 @@ private:
     AkonadiFetcher* m_fetcher = nullptr;
     RssFetcher* m_rssFetcher = nullptr;
     MinifluxFetcher* m_minifluxFetcher = nullptr;
+    HtmlExtractor* m_htmlExtractor = nullptr;
 
 signals:
     void statusMessageChanged();
@@ -175,6 +190,9 @@ signals:
     void lastMinifluxCategoryIdChanged();
     void lastMinifluxStatusFilterChanged();
     void lastRssFeedIdChanged();
+    void resolveStubsChanged();
+    void stubThresholdChanged();
+    void requestDelayMsChanged();
 };
 
 } // namespace endpaper

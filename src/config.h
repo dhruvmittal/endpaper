@@ -21,10 +21,19 @@ public:
     [[nodiscard]] std::filesystem::path state_dir() const;
     [[nodiscard]] std::filesystem::path log_path() const;
 
-    /// Get a config value. Returns `default_val` if not found.
     [[nodiscard]] std::string get(const std::string& section,
                                   const std::string& key,
                                   const std::string& default_val = "") const;
+
+    /// Get a config value as an integer.
+    [[nodiscard]] int get_int(const std::string& section,
+                              const std::string& key,
+                              int default_val = 0) const;
+
+    /// Get a config value as a boolean.
+    [[nodiscard]] bool get_bool(const std::string& section,
+                                const std::string& key,
+                                bool default_val = false) const;
 
     /// Set a config value (in memory only).
     void set(const std::string& section, const std::string& key,
