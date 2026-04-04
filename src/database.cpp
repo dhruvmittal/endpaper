@@ -241,6 +241,23 @@ void Database::reverse_chapter_order(int64_t book_id) {
             update_sort_order(chapters[i].id, orders[orders.size() - 1 - i]);
         }
         exec("COMMIT;");
+        renumber_chapters(book_id);
+    } catch (...) {
+        exec("ROLLBACK;");
+        throw;
+    }
+}
+
+void Database::renumber_chapters(int64_t book_id) {
+    auto chapters = get_chapters(book_id);
+    if (chapters.empty()) return;
+
+    exec("BEGIN TRANSACTION;");
+    try {
+        for (size_t i = 0; i < chapters.size(); ++i) {
+            update_sort_order(chapters[i].id, static_cast<int>(i) + 1);
+        }
+        exec("COMMIT;");
     } catch (...) {
         exec("ROLLBACK;");
         throw;

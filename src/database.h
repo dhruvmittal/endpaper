@@ -60,6 +60,7 @@ public:
     void delete_chapter(int64_t chapter_id);
     void delete_all_chapters(int64_t book_id);
     void reverse_chapter_order(int64_t book_id);
+    void renumber_chapters(int64_t book_id);
     void auto_sort_chapters(int64_t book_id);
     [[nodiscard]] int max_sort_order(int64_t book_id);
 

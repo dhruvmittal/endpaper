@@ -3,6 +3,7 @@
 #include "akonadi_fetcher.h"
 #include "rss_fetcher.h"
 #include "miniflux_fetcher.h"
+#include "html_extractor.h"
 #include "endpaper_bridge.h"
 
 #include <QGuiApplication>
@@ -12,6 +13,9 @@
 #include <QIcon>
 #include <QDirIterator>
 #include <QDebug>
+
+#include <KLocalizedContext>
+#include <KLocalizedString>
 
 int main(int argc, char* argv[]) {
     // Enable High DPI Support
@@ -23,6 +27,8 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName("Endpaper");
     app.setOrganizationDomain("endpaper.local");
     app.setApplicationVersion("0.1.0");
+
+    KLocalizedString::setApplicationDomain("endpaper-qt");
 
     // Use Breeze style by default for Kirigami if not set
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) {
@@ -37,6 +43,7 @@ int main(int argc, char* argv[]) {
     endpaper::AkonadiFetcher fetcher;
     endpaper::RssFetcher rss_fetcher;
     endpaper::MinifluxFetcher miniflux_fetcher;
+    endpaper::HtmlExtractor html_extractor;
     
     // Set Miniflux credentials if present
     std::string url = config.get("miniflux", "url", "");
@@ -45,27 +52,21 @@ int main(int argc, char* argv[]) {
 
     // QML Engine setup
     QQmlApplicationEngine engine;
+    engine.rootContext()->setContextObject(new KLocalizedContext(&engine));
     
     // Explicitly add QML_IMPORT_PATHs from the environment
-    const QString qmlPathEnv = qEnvironmentVariable("QML_IMPORT_PATH");
-    for (const QString& path : qmlPathEnv.split(':', Qt::SkipEmptyParts)) {
-        engine.addImportPath(path);
+    for (const char* envName : {"QML_IMPORT_PATH", "QML2_IMPORT_PATH"}) {
+        const QString qmlPathEnv = qEnvironmentVariable(envName);
+        for (const QString& path : qmlPathEnv.split(':', Qt::SkipEmptyParts)) {
+            engine.addImportPath(path);
+        }
     }
     
     // Instantiate Bridge as singleton (injected into context here as a simple property since we create the instance)
-    // Wait, since we marked it as QML_SINGLETON, we could just let QML register it. 
-    // But we need to inject dependencies. The best way is to instantiate it, init it, and set it as context property or use qmlRegisterSingletonInstance.
     endpaper::EndpaperBridge bridge;
-    bridge.init(&config, &db, &fetcher, &rss_fetcher, &miniflux_fetcher);
+    bridge.init(&config, &db, &fetcher, &rss_fetcher, &miniflux_fetcher, &html_extractor);
     
     engine.rootContext()->setContextProperty("Bridge", &bridge);
-
-    QDirIterator it(":", QDirIterator::Subdirectories);
-    qDebug() << "--- Available QRC Paths ---";
-    while (it.hasNext()) {
-        qDebug() << it.next();
-    }
-    qDebug() << "---------------------------";
 
     const QUrl url_main("qrc:/org/kde/endpaper/src/qml/main.qml");
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,

@@ -18,10 +18,9 @@ set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH} ${CMAKE_MODULE_PATH})
 find_package(KPim6Mime REQUIRED)
 find_package(KPim6Akonadi REQUIRED)
 find_package(KPim6AkonadiMime REQUIRED)
+find_package(KF6 REQUIRED COMPONENTS Kirigami I18n)
 
-# ── Kirigami ──────────────────────────────────────────────────────────────
-find_package(KF6 REQUIRED COMPONENTS Kirigami)
-find_package(KF6KirigamiAddons REQUIRED)
+# ── Kirigami (runtime-only, discovered via QML2_IMPORT_PATH) ──────────────
 
 # ── FTXUI ──────────────────────────────────────────────────────────────────
 find_package(ftxui REQUIRED)
@@ -46,6 +45,7 @@ set(ENDPAPER_SOURCES
     src/akonadi_fetcher.cpp
     src/rss_fetcher.cpp
     src/miniflux_fetcher.cpp
+    src/html_extractor.cpp
     src/tui_app.cpp
 )
 
@@ -99,15 +99,15 @@ qt_add_executable(endpaper-qt
     src/akonadi_fetcher.cpp
     src/rss_fetcher.cpp
     src/miniflux_fetcher.cpp
+    src/html_extractor.cpp
     src/endpaper_bridge.cpp
     src/endpaper_bridge.h
     src/qml_models.h
 )
 
-qt_add_qml_module(endpaper-qt
-    URI "org.kde.endpaper"
-    VERSION 1.0
-    QML_FILES
+qt_add_resources(endpaper-qt "qml"
+    PREFIX "/org/kde/endpaper/"
+    FILES
         src/qml/main.qml
         src/qml/Components/ArticleListView.qml
         src/qml/Pages/SettingsPage.qml
@@ -126,7 +126,7 @@ target_include_directories(endpaper-qt PRIVATE
 
 target_link_libraries(endpaper-qt PRIVATE
     Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2
-    KF6::Kirigami
+    KF6::I18n
     KPim6::Mime KPim6::AkonadiCore KPim6::AkonadiMime
     pugixml::pugixml
     ${SQLITE3_LIBRARIES}
@@ -137,5 +137,10 @@ target_link_directories(endpaper-qt PRIVATE
     ${SQLITE3_LIBRARY_DIRS}
     ${LIBZIP_LIBRARY_DIRS}
 )
+
+# ── Unit tests ─────────────────────────────────────────────────────────────
+add_executable(test_html_extractor tests/test_html_extractor.cpp src/html_extractor.cpp)
+target_link_libraries(test_html_extractor PRIVATE Qt6::Core Qt6::Network)
+target_include_directories(test_html_extractor PRIVATE src)
 
 install(TARGETS endpaper-qt DESTINATION bin)

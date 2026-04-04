@@ -43,8 +43,8 @@ static std::string slugify(const std::string& s) {
 // TuiApp implementation
 // ══════════════════════════════════════════════════════════════════════════
 
-TuiApp::TuiApp(Config& config, Database& db, AkonadiFetcher& fetcher, RssFetcher& rss_fetcher, MinifluxFetcher& miniflux_fetcher)
-    : config_(config), db_(db), fetcher_(fetcher), rss_fetcher_(rss_fetcher), miniflux_fetcher_(miniflux_fetcher) {}
+TuiApp::TuiApp(Config& config, Database& db, AkonadiFetcher& fetcher, RssFetcher& rss_fetcher, MinifluxFetcher& miniflux_fetcher, HtmlExtractor& html_extractor)
+    : config_(config), db_(db), fetcher_(fetcher), rss_fetcher_(rss_fetcher), miniflux_fetcher_(miniflux_fetcher), html_extractor_(html_extractor) {}
 
 void TuiApp::run() {
     auto screen = ScreenInteractive::Fullscreen();
@@ -64,6 +64,11 @@ void TuiApp::run() {
         last_miniflux_category = config_.get("state", "last_miniflux_category", "");
         last_build_book = config_.get("state", "last_build_book", "");
     }
+    
+    bool enable_stub_resolving = config_.get_bool("fetching", "enable_stub_resolving", true);
+    std::string stub_threshold_text = std::to_string(config_.get_int("fetching", "stub_char_threshold", 1000));
+    std::string request_delay_text = std::to_string(config_.get_int("fetching", "request_delay_ms", 1000));
+    
     std::string status_message;
     std::mutex state_mutex;
 
@@ -446,6 +451,7 @@ void TuiApp::run() {
         status_message = "Staged " + std::to_string(staged) + " emails";
         email_selected.assign(emails.size(), false);
         apply_email_filter();
+        db_.renumber_chapters(book_id);
         refresh_chapters();
     });
 
@@ -611,24 +617,38 @@ void TuiApp::run() {
         std::thread([&, selected_entries = std::move(selected_entries), book_id]() {
             int base_order = db_.max_sort_order(book_id);
             int staged = 0;
+
+            bool resolve_stubs = config_.get_bool("fetching", "enable_stub_resolving", true);
+            size_t threshold = config_.get_int("fetching", "stub_char_threshold", 1000);
+            int delay_ms = config_.get_int("fetching", "request_delay_ms", 1000);
+
             for (const auto& ent : selected_entries) {
-                try {
+                std::string content = ent.content;
+                if (resolve_stubs && content.size() < threshold) {
                     {
                         std::lock_guard lock(state_mutex);
-                        status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_entries.size()) + "]: " + ent.title;
+                        status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_entries.size()) + "]: Resolving stub for " + ent.title;
                     }
                     screen.Post(Event::Custom);
 
-                    auto fut = miniflux_fetcher_.fetch_original_content(ent.id);
-                    std::string full_content = fut.get();
-                    
+                    if (staged > 0 && delay_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                    }
+
+                    try {
+                        auto fut = miniflux_fetcher_.fetch_original_content(ent.id);
+                        std::string full_content = fut.get();
+                        if (!full_content.empty()) content = full_content;
+                    } catch (...) {}
+                } else {
                     std::lock_guard lock(state_mutex);
-                    db_.add_chapter(book_id, ent.title, ent.author, sanitize_html(full_content), base_order + staged + 1);
-                    staged++;
-                } catch (...) {
-                    // Fall back to summary content
+                    status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_entries.size()) + "]: " + ent.title;
+                    screen.Post(Event::Custom);
+                }
+
+                {
                     std::lock_guard lock(state_mutex);
-                    db_.add_chapter(book_id, ent.title, ent.author, sanitize_html(ent.content), base_order + staged + 1);
+                    db_.add_chapter(book_id, ent.title, ent.author, sanitize_html(content), base_order + staged + 1);
                     staged++;
                 }
             }
@@ -636,10 +656,11 @@ void TuiApp::run() {
                 std::lock_guard lock(state_mutex);
                 status_message = "✓ Staged " + std::to_string(staged) + " entries";
                 miniflux_selected.assign(miniflux_entries.size(), false);
+                loading_miniflux_entries = false;
                 apply_miniflux_filter();
+                db_.renumber_chapters(book_id);
                 refresh_chapters();
             }
-            loading_miniflux_entries = false;
             screen.Post(Event::Custom);
         }).detach();
     });
@@ -773,14 +794,67 @@ void TuiApp::run() {
 
     auto btn_stage_rss = Button("✓ Stage Selected", [&] {
         if (books.empty()) { status_message = "Create a book first!"; return; }
+        if (loading_rss) return;
+
+        std::vector<RssItem> selected_articles;
+        for (size_t i = 0; i < rss_articles.size(); ++i) {
+            if (rss_selected[i]) selected_articles.push_back(rss_articles[i]);
+        }
+        if (selected_articles.empty()) return;
+
+        loading_rss = true;
         int64_t book_id = books[build_book_selected].id;
-        int base_order = db_.max_sort_order(book_id);
-        int staged = 0;
-        for (size_t i = 0; i < rss_articles.size(); ++i) { if (rss_selected[i]) { db_.add_chapter(book_id, rss_articles[i].title, rss_articles[i].author, sanitize_html(rss_articles[i].content_html), base_order + staged + 1); staged++; } }
-        status_message = "Staged " + std::to_string(staged) + " articles";
-        rss_selected.assign(rss_articles.size(), false);
-        apply_rss_filter();
-        refresh_chapters();
+        status_message = "Staging (fetching full content)...";
+
+        std::thread([&, selected_articles = std::move(selected_articles), book_id]() {
+            int base_order = db_.max_sort_order(book_id);
+            int staged = 0;
+
+            bool resolve_stubs = config_.get_bool("fetching", "enable_stub_resolving", true);
+            size_t threshold = config_.get_int("fetching", "stub_char_threshold", 1000);
+            int delay_ms = config_.get_int("fetching", "request_delay_ms", 1000);
+
+            for (const auto& art : selected_articles) {
+                std::string content = art.content_html;
+                if (resolve_stubs && content.size() < threshold && !art.link.empty()) {
+                    {
+                        std::lock_guard lock(state_mutex);
+                        status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_articles.size()) + "]: Resolving stub for " + art.title;
+                    }
+                    screen.Post(Event::Custom);
+
+                    if (staged > 0 && delay_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                    }
+
+                    try {
+                        auto fut = html_extractor_.fetch_and_extract(art.link);
+                        std::string full_content = fut.get();
+                        if (!full_content.empty()) content = full_content;
+                    } catch (...) {}
+                } else {
+                    std::lock_guard lock(state_mutex);
+                    status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_articles.size()) + "]: " + art.title;
+                    screen.Post(Event::Custom);
+                }
+
+                {
+                    std::lock_guard lock(state_mutex);
+                    db_.add_chapter(book_id, art.title, art.author, sanitize_html(content), base_order + staged + 1);
+                    staged++;
+                }
+            }
+            {
+                std::lock_guard lock(state_mutex);
+                status_message = "✓ Staged " + std::to_string(staged) + " articles";
+                rss_selected.assign(rss_articles.size(), false);
+                loading_rss = false;
+                apply_rss_filter();
+                db_.renumber_chapters(book_id);
+                refresh_chapters();
+            }
+            screen.Post(Event::Custom);
+        }).detach();
     });
 
     auto btn_rss_select_all = Button("☑ All", [&] {
@@ -877,7 +951,26 @@ void TuiApp::run() {
     book_menu_option.on_change = [&] { refresh_chapters(); };
     auto book_menu = Menu(&book_labels, &book_selected, book_menu_option);
     book_menu->TakeFocus();
-    auto chapter_menu = Menu(&chapter_labels, &chapter_selected);
+
+    auto chapter_menu_option = MenuOption::Vertical();
+    chapter_menu_option.on_enter = [&] {
+        if (!chapters.empty()) {
+            db_.reverse_chapter_order(books[book_selected].id);
+            refresh_chapters();
+        }
+    };
+    auto chapter_menu = Menu(&chapter_labels, &chapter_selected, chapter_menu_option);
+
+    auto chapter_menu_wrapper = CatchEvent(chapter_menu, [&](Event e) {
+        if (e == Event::Character('r') || e == Event::Character('R')) {
+            if (!books.empty() && book_selected >= 0) {
+                db_.reverse_chapter_order(books[book_selected].id);
+                refresh_chapters();
+                return true;
+            }
+        }
+        return chapter_menu->OnEvent(e);
+    });
 
     auto btn_create_book = Button("+ Create Book", [&] {
         if (new_book_title.empty()) return;
@@ -894,6 +987,7 @@ void TuiApp::run() {
         int i = chapter_selected;
         db_.update_sort_order(chapters[i].id, chapters[i-1].sort_order);
         db_.update_sort_order(chapters[i-1].id, chapters[i].sort_order);
+        db_.renumber_chapters(books[book_selected].id);
         chapter_selected--; refresh_chapters();
     });
 
@@ -902,17 +996,26 @@ void TuiApp::run() {
         int i = chapter_selected;
         db_.update_sort_order(chapters[i].id, chapters[i+1].sort_order);
         db_.update_sort_order(chapters[i+1].id, chapters[i].sort_order);
+        db_.renumber_chapters(books[book_selected].id);
         chapter_selected++; refresh_chapters();
     });
 
     auto btn_delete_chapter = Button("✕ Remove", [&] {
         if (chapters.empty()) return;
-        db_.delete_chapter(chapters[chapter_selected].id); refresh_chapters(); status_message = "Chapter removed";
+        db_.delete_chapter(chapters[chapter_selected].id);
+        db_.renumber_chapters(books[book_selected].id);
+        refresh_chapters(); status_message = "Chapter removed";
+    });
+
+    auto btn_reverse_chapters = Button("⇅ Reverse", [&] {
+        if (books.empty()) return;
+        db_.reverse_chapter_order(books[book_selected].id);
+        refresh_chapters(); status_message = "Order reversed";
     });
 
     auto books_tab = Container::Horizontal({
         Container::Vertical({book_menu, Container::Horizontal({Input(&new_book_title, "New Book"), btn_create_book}), btn_delete_book}),
-        Container::Vertical({chapter_menu, Container::Horizontal({btn_move_up, btn_move_down, btn_delete_chapter})})
+        Container::Vertical({chapter_menu_wrapper, Container::Horizontal({btn_move_up, btn_move_down, btn_reverse_chapters, btn_delete_chapter})})
     });
 
     auto books_renderer = Renderer(books_tab, [&] {
@@ -1057,11 +1160,23 @@ void TuiApp::run() {
         status_message = "Behavior settings saved!";
     });
 
+    auto check_resolve_stubs = Checkbox("Automatically resolve article stubs during staging", &enable_stub_resolving);
+    auto input_stub_threshold = Input(&stub_threshold_text, "Threshold (chars)");
+    auto input_request_delay = Input(&request_delay_text, "Request Delay (ms)");
+    auto btn_save_fetching = Button("Save Fetching Settings", [&] {
+        config_.set("fetching", "enable_stub_resolving", enable_stub_resolving ? "true" : "false");
+        config_.set("fetching", "stub_char_threshold", stub_threshold_text);
+        config_.set("fetching", "request_delay_ms", request_delay_text);
+        config_.save();
+        status_message = "Fetching settings saved!";
+    });
+
     auto settings_tab = Container::Vertical({
         input_miniflux_url, input_miniflux_token, btn_save_miniflux,
         input_rss_max, btn_save_rss,
         btn_save_fuzzy,
-        check_auto_akonadi, check_auto_miniflux, check_remember_config, btn_save_behavior
+        check_auto_akonadi, check_auto_miniflux, check_remember_config, btn_save_behavior,
+        check_resolve_stubs, input_stub_threshold, input_request_delay, btn_save_fetching
     });
     auto settings_renderer = Renderer(settings_tab, [&] {
         Elements rows;
@@ -1080,6 +1195,21 @@ void TuiApp::run() {
         rows.push_back(separator());
         rows.push_back(text("Behavior & Memory") | bold);
         rows.push_back(check_auto_akonadi->Render());
+        rows.push_back(check_auto_miniflux->Render());
+        rows.push_back(check_remember_config->Render());
+        rows.push_back(btn_save_behavior->Render());
+        rows.push_back(separator());
+        rows.push_back(text("Fetching & Stubs") | bold);
+        rows.push_back(check_resolve_stubs->Render());
+        Elements thresh_row;
+        thresh_row.push_back(text("  Threshold: "));
+        thresh_row.push_back(input_stub_threshold->Render() | flex);
+        rows.push_back(hbox(std::move(thresh_row)));
+        Elements delay_row;
+        delay_row.push_back(text("  Delay (ms): "));
+        delay_row.push_back(input_request_delay->Render() | flex);
+        rows.push_back(hbox(std::move(delay_row)));
+        rows.push_back(btn_save_fetching->Render());
         rows.push_back(check_auto_miniflux->Render());
         rows.push_back(check_remember_config->Render());
         rows.push_back(btn_save_behavior->Render());

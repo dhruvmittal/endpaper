@@ -21,19 +21,25 @@
           nativeBuildInputs = [
             pkgs.cmake
             pkgs.pkg-config
+            pkgs.makeWrapper
             pkgs.qt6.wrapQtAppsHook
             kde.extra-cmake-modules
           ];
 
           buildInputs = [
-            pkgs.qt6.qtbase
-            pkgs.qt6.qtdeclarative
-            pkgs.qt6.qtsvg
+            kde.qtbase
+            kde.qtdeclarative
+            kde.qtsvg
             kde.akonadi
             kde.kmime
             kde.akonadi-mime
             kde.kirigami
             kde.kirigami-addons
+            kde.ki18n
+            kde.breeze
+            kde.qqc2-desktop-style
+            kde.plasma-integration
+            kde.kdepim-runtime   # provides akonadi_serializer_mail plugin
             pkgs.ftxui
             pkgs.sqlite
             pkgs.libzip
@@ -42,67 +48,48 @@
 
           cmakeFlags = [
             "-DCMAKE_BUILD_TYPE=Release"
+            "-DCMAKE_INSTALL_PREFIX=${placeholder "out"}"
           ];
+
+          dontWrapQtApps = true;
+
+          postInstall = ''
+            for prog in endpaper endpaper-qt; do
+              wrapProgram $out/bin/$prog \
+                --set QML_DISABLE_DISK_CACHE "1" \
+                --prefix QML2_IMPORT_PATH : "${kde.kirigami}/lib/qt-6/qml" \
+                --prefix QML2_IMPORT_PATH : "${kde.kirigami-addons}/lib/qt-6/qml" \
+                --prefix QML2_IMPORT_PATH : "${kde.qqc2-desktop-style}/lib/qt-6/qml" \
+                --prefix QML2_IMPORT_PATH : "${kde.qtdeclarative}/lib/qt-6/qml" \
+                --prefix QT_PLUGIN_PATH : "${kde.qtbase}/lib/qt-6/plugins" \
+                --prefix QT_PLUGIN_PATH : "${kde.plasma-integration}/lib/qt-6/plugins" \
+                --prefix QT_PLUGIN_PATH : "${kde.breeze}/lib/qt-6/plugins" \
+                --prefix XDG_DATA_DIRS : "${kde.kirigami}/share" \
+                --prefix XDG_DATA_DIRS : "${pkgs.kdePackages.breeze-icons}/share" \
+                --prefix XDG_DATA_DIRS : "$out/share" \
+                --set QT_QPA_PLATFORMTHEME "kde"
+            done
+          '';
         };
 
         devShells.default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${system}.default ];
+
           nativeBuildInputs = [
-            pkgs.cmake
-            pkgs.pkg-config
-            pkgs.qt6.wrapQtAppsHook
-            kde.extra-cmake-modules
             pkgs.gdb
             pkgs.valgrind
             pkgs.clang-tools
           ];
 
-          buildInputs = [
-            pkgs.qt6.qtbase
-            pkgs.qt6.qtdeclarative
-            pkgs.qt6.qtsvg
-            kde.akonadi
-            kde.kmime
-            kde.akonadi-mime
-            kde.kdepim-runtime   # provides akonadi_serializer_mail plugin
-            kde.kirigami
-            kde.kirigami-addons
-            pkgs.ftxui
-            pkgs.sqlite
-            pkgs.libzip
-            pkgs.pugixml
-          ];
+          # Ensure QML modules and plugins are found at runtime during development
+          # These are picked up by nix develop --command as well
+          QML_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with kde; [ qtdeclarative kirigami kirigami-addons qqc2-desktop-style ]);
+          QML2_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with kde; [ qtdeclarative kirigami kirigami-addons qqc2-desktop-style ]);
+          QT_PLUGIN_PATH = pkgs.lib.makeSearchPath "lib/qt-6/plugins" (with kde; [ qtbase akonadi-mime plasma-integration breeze ]);
+          XDG_DATA_DIRS = pkgs.lib.makeSearchPath "share" (with kde; [ kirigami breeze-icons ]);
+          QT_QPA_PLATFORMTHEME = "kde";
 
           shellHook = ''
-            # Build CMAKE_PREFIX_PATH from all inputs that have cmake configs
-            for p in $buildInputs $nativeBuildInputs; do
-              if [ -d "$p/lib/cmake" ] || [ -d "$p/share/ECM" ] || [ -d "$p/share/cmake" ]; then
-                export CMAKE_PREFIX_PATH="$p''${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
-              fi
-            done
-
-            # Set QT_PLUGIN_PATH so Akonadi can find serializer plugins
-            # Include plugins from buildInputs
-            for p in $buildInputs; do
-              if [ -d "$p/lib/qt-6/plugins" ]; then
-                export QT_PLUGIN_PATH="$p/lib/qt-6/plugins''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
-              fi
-              if [ -d "$p/lib/qt-6/qml" ]; then
-                export QML_IMPORT_PATH="$p/lib/qt-6/qml''${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
-              fi
-            done
-            # Include the NixOS system plugin path (has akonadi_serializer_mail.so)
-            sysPath="/run/current-system/sw/lib/qt-6/plugins"
-            if [ -d "$sysPath" ]; then
-              export QT_PLUGIN_PATH="$sysPath''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
-            fi
-            # Also check the system-path in the nix store
-            for sp in /nix/store/*-system-path/lib/qt-6/plugins; do
-              if [ -d "$sp" ]; then
-                export QT_PLUGIN_PATH="$sp''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
-                break
-              fi
-            done
-
             echo "🔧 Endpaper dev shell ready"
             echo "   cmake -B build && cmake --build build"
           '';

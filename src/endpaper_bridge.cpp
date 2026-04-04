@@ -1,6 +1,7 @@
 #include "endpaper_bridge.h"
 #include "epub_builder.h"
 #include "html_sanitizer.h"
+#include "html_extractor.h"
 
 #include <thread>
 #include <mutex>
@@ -33,12 +34,13 @@ EndpaperBridge::EndpaperBridge(QObject* parent) : QObject(parent) {
 
 EndpaperBridge::~EndpaperBridge() = default;
 
-void EndpaperBridge::init(Config* config, Database* db, AkonadiFetcher* fetcher, RssFetcher* rssFetcher, MinifluxFetcher* minifluxFetcher) {
+void EndpaperBridge::init(Config* config, Database* db, AkonadiFetcher* fetcher, RssFetcher* rssFetcher, MinifluxFetcher* minifluxFetcher, HtmlExtractor* htmlExtractor) {
     m_config = config;
     m_db = db;
     m_fetcher = fetcher;
     m_rssFetcher = rssFetcher;
     m_minifluxFetcher = minifluxFetcher;
+    m_htmlExtractor = htmlExtractor;
 
     if (cacheMetadata()) {
         m_folderModel->setFolders(m_db->load_folder_cache());
@@ -141,11 +143,13 @@ void EndpaperBridge::refreshChapters() {
 void EndpaperBridge::deleteChapter(qint64 chapterId) {
     if (!m_db) return;
     m_db->delete_chapter(chapterId);
+    if (m_selectedBookId != -1) m_db->renumber_chapters(m_selectedBookId);
     refreshChapters();
 }
 
 void EndpaperBridge::moveChapterUp(qint64 chapterId) {
     if (!m_db || m_selectedBookId == -1) return;
+    qDebug() << "Moving chapter up:" << chapterId << "in book" << m_selectedBookId;
     auto chaps = m_db->get_chapters(m_selectedBookId);
     for (size_t i = 1; i < chaps.size(); ++i) {
         if (chaps[i].id == chapterId) {
@@ -153,6 +157,7 @@ void EndpaperBridge::moveChapterUp(qint64 chapterId) {
             int newOrder = chaps[i-1].sort_order;
             m_db->update_sort_order(chaps[i].id, newOrder);
             m_db->update_sort_order(chaps[i-1].id, oldOrder);
+            m_db->renumber_chapters(m_selectedBookId);
             refreshChapters();
             break;
         }
@@ -161,6 +166,7 @@ void EndpaperBridge::moveChapterUp(qint64 chapterId) {
 
 void EndpaperBridge::moveChapterDown(qint64 chapterId) {
     if (!m_db || m_selectedBookId == -1) return;
+    qDebug() << "Moving chapter down:" << chapterId << "in book" << m_selectedBookId;
     auto chaps = m_db->get_chapters(m_selectedBookId);
     for (size_t i = 0; i < chaps.size(); ++i) {
         if (i < chaps.size() - 1 && chaps[i].id == chapterId) {
@@ -168,10 +174,19 @@ void EndpaperBridge::moveChapterDown(qint64 chapterId) {
             int newOrder = chaps[i+1].sort_order;
             m_db->update_sort_order(chaps[i].id, newOrder);
             m_db->update_sort_order(chaps[i+1].id, oldOrder);
+            m_db->renumber_chapters(m_selectedBookId);
             refreshChapters();
             break;
         }
     }
+}
+
+void EndpaperBridge::reverseChapterOrder() {
+    if (!m_db || m_selectedBookId == -1) return;
+    qDebug() << "Reversing chapters in book" << m_selectedBookId;
+    m_db->reverse_chapter_order(m_selectedBookId);
+    m_db->renumber_chapters(m_selectedBookId);
+    refreshChapters();
 }
 
 void EndpaperBridge::fetchFolders() {
@@ -271,6 +286,7 @@ void EndpaperBridge::stageSelectedEmails() {
     
     setStatus(QString("Staged %1 emails").arg(staged));
     m_emailModel->deselectAll();
+    m_db->renumber_chapters(m_selectedBookId);
     refreshChapters();
 }
 
@@ -385,26 +401,68 @@ void EndpaperBridge::stageSelectedMiniflux() {
         return;
     }
     
-    const auto& entries = m_minifluxEntryModel->getEntries();
-    int baseOrder = m_db->max_sort_order(m_selectedBookId);
-    int staged = 0;
-    
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (m_minifluxEntryModel->isSelected(i)) {
-            m_db->add_chapter(
-                m_selectedBookId,
-                entries[i].title,
-                entries[i].author,
-                sanitize_html(entries[i].content),
-                baseOrder + staged + 1
-            );
-            staged++;
+    setBusy(true);
+    std::thread([this]() {
+        const auto& entries = m_minifluxEntryModel->getEntries();
+        int baseOrder = m_db->max_sort_order(m_selectedBookId);
+        int staged = 0;
+        int totalToStage = 0;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (m_minifluxEntryModel->isSelected(i)) totalToStage++;
         }
-    }
-    
-    setStatus(QString("Staged %1 Miniflux entries").arg(staged));
-    m_minifluxEntryModel->deselectAll();
-    refreshChapters();
+
+        bool resolveStubs = m_config->get_bool("fetching", "enable_stub_resolving", true);
+        size_t threshold = m_config->get_int("fetching", "stub_char_threshold", 1000);
+        int delayMs = m_config->get_int("fetching", "request_delay_ms", 1000);
+
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (m_minifluxEntryModel->isSelected(i)) {
+                std::string content = entries[i].content;
+                
+                if (resolveStubs && content.size() < threshold) {
+                    setStatus(QString("Staging %1/%2: Resolving stub for %3...")
+                              .arg(staged + 1).arg(totalToStage)
+                              .arg(QString::fromStdString(entries[i].title)));
+                    
+                    // Delay to avoid rate limits
+                    if (staged > 0 && delayMs > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                    }
+
+                    try {
+                        auto future = m_minifluxFetcher->fetch_original_content(entries[i].id);
+                        std::string fetched = future.get();
+                        if (!fetched.empty()) content = fetched;
+                    } catch (...) {
+                        qDebug() << "Failed to fetch original content for Miniflux entry" << entries[i].id;
+                    }
+                } else {
+                    setStatus(QString("Staging %1/%2: %3")
+                              .arg(staged + 1).arg(totalToStage)
+                              .arg(QString::fromStdString(entries[i].title)));
+                }
+
+                m_db->add_chapter(
+                    m_selectedBookId,
+                    entries[i].title,
+                    entries[i].author,
+                    sanitize_html(content),
+                    baseOrder + staged + 1
+                );
+                staged++;
+            }
+        }
+        
+        m_db->renumber_chapters(m_selectedBookId);
+        
+        // Return to main thread to update UI
+        QMetaObject::invokeMethod(this, [this, staged]() {
+            setStatus(QString("Successfully staged %1 Miniflux entries").arg(staged));
+            m_minifluxEntryModel->deselectAll();
+            refreshChapters();
+            setBusy(false);
+        });
+    }).detach();
 }
 
 void EndpaperBridge::selectAllMiniflux() { m_minifluxEntryModel->selectAll(); }
@@ -473,26 +531,68 @@ void EndpaperBridge::stageSelectedRss() {
         return;
     }
     
-    const auto& entries = m_rssEntryModel->getEntries();
-    int baseOrder = m_db->max_sort_order(m_selectedBookId);
-    int staged = 0;
-    
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (m_rssEntryModel->isSelected(i)) {
-            m_db->add_chapter(
-                m_selectedBookId,
-                entries[i].title,
-                entries[i].author,
-                sanitize_html(entries[i].content_html),
-                baseOrder + staged + 1
-            );
-            staged++;
+    setBusy(true);
+    std::thread([this]() {
+        const auto& entries = m_rssEntryModel->getEntries();
+        int baseOrder = m_db->max_sort_order(m_selectedBookId);
+        int staged = 0;
+        int totalToStage = 0;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (m_rssEntryModel->isSelected(i)) totalToStage++;
         }
-    }
-    
-    setStatus(QString("Staged %1 RSS entries").arg(staged));
-    m_rssEntryModel->deselectAll();
-    refreshChapters();
+
+        bool resolveStubs = m_config->get_bool("fetching", "enable_stub_resolving", true);
+        size_t threshold = m_config->get_int("fetching", "stub_char_threshold", 1000);
+        int delayMs = m_config->get_int("fetching", "request_delay_ms", 1000);
+
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (m_rssEntryModel->isSelected(i)) {
+                std::string content = entries[i].content_html;
+                
+                if (resolveStubs && content.size() < threshold && !entries[i].link.empty()) {
+                    setStatus(QString("Staging %1/%2: Resolving stub for %3...")
+                              .arg(staged + 1).arg(totalToStage)
+                              .arg(QString::fromStdString(entries[i].title)));
+                    
+                    // Delay to avoid rate limits
+                    if (staged > 0 && delayMs > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                    }
+
+                    try {
+                        auto future = m_htmlExtractor->fetch_and_extract(entries[i].link);
+                        std::string fetched = future.get();
+                        if (!fetched.empty()) content = fetched;
+                    } catch (...) {
+                        qDebug() << "Failed to fetch original content for RSS entry" << entries[i].link.c_str();
+                    }
+                } else {
+                    setStatus(QString("Staging %1/%2: %3")
+                              .arg(staged + 1).arg(totalToStage)
+                              .arg(QString::fromStdString(entries[i].title)));
+                }
+
+                m_db->add_chapter(
+                    m_selectedBookId,
+                    entries[i].title,
+                    entries[i].author,
+                    sanitize_html(content),
+                    baseOrder + staged + 1
+                );
+                staged++;
+            }
+        }
+        
+        m_db->renumber_chapters(m_selectedBookId);
+        
+        // Return to main thread to update UI
+        QMetaObject::invokeMethod(this, [this, staged]() {
+            setStatus(QString("Successfully staged %1 RSS entries").arg(staged));
+            m_rssEntryModel->deselectAll();
+            refreshChapters();
+            setBusy(false);
+        });
+    }).detach();
 }
 
 void EndpaperBridge::selectAllRss() { m_rssEntryModel->selectAll(); }
@@ -701,5 +801,41 @@ void EndpaperBridge::setLastRssFeedId(qint64 id) {
         m_config->save();
     }
     emit lastRssFeedIdChanged();
+}
+
+bool EndpaperBridge::resolveStubs() const {
+    return m_config->get_bool("fetching", "enable_stub_resolving", true);
+}
+
+void EndpaperBridge::setResolveStubs(bool resolve) {
+    if (resolveStubs() != resolve) {
+        m_config->set("fetching", "enable_stub_resolving", resolve ? "true" : "false");
+        m_config->save();
+        emit resolveStubsChanged();
+    }
+}
+
+int EndpaperBridge::stubThreshold() const {
+    return m_config->get_int("fetching", "stub_char_threshold", 1000);
+}
+
+void EndpaperBridge::setStubThreshold(int threshold) {
+    if (stubThreshold() != threshold) {
+        m_config->set("fetching", "stub_char_threshold", std::to_string(threshold));
+        m_config->save();
+        emit stubThresholdChanged();
+    }
+}
+
+int EndpaperBridge::requestDelayMs() const {
+    return m_config->get_int("fetching", "request_delay_ms", 1000);
+}
+
+void EndpaperBridge::setRequestDelayMs(int ms) {
+    if (requestDelayMs() != ms) {
+        m_config->set("fetching", "request_delay_ms", std::to_string(ms));
+        m_config->save();
+        emit requestDelayMsChanged();
+    }
 }
 

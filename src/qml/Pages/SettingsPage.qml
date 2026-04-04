@@ -65,6 +65,31 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormHeader {
+            title: "Fetching & Stubs"
+        }
+
+        FormCard.FormCard {
+            FormCard.FormSwitchDelegate {
+                text: "Resolve Article Stubs"
+                description: "Automatically fetch full content for short articles during staging"
+                checked: Bridge.resolveStubs
+                onToggled: Bridge.resolveStubs = checked
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormTextFieldDelegate {
+                label: "Stub Threshold (characters)"
+                text: Bridge.stubThreshold.toString()
+                onAccepted: Bridge.stubThreshold = parseInt(text)
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormTextFieldDelegate {
+                label: "Request Delay (ms)"
+                text: Bridge.requestDelayMs.toString()
+                onAccepted: Bridge.requestDelayMs = parseInt(text)
+            }
+        }
+
+        FormCard.FormHeader {
             title: "System"
         }
 
