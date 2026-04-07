@@ -1025,7 +1025,6 @@ void TuiApp::run() {
         left_rows.push_back(separator());
         Elements create_row;
         create_row.push_back(books_tab->ChildAt(0)->ChildAt(1)->Render());
-        create_row.push_back(btn_create_book->Render());
         left_rows.push_back(hbox(std::move(create_row)));
         left_rows.push_back(btn_delete_book->Render());
 
