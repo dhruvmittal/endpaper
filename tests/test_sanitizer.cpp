@@ -229,6 +229,60 @@ void test_simplify_removes_forms() {
     assert(result.find("<button") == std::string::npos);
 }
 
+void test_removes_problematic_attributes() {
+    // Test that title and data-* attributes are stripped, especially with HTML inside title
+    std::string input = R"(<a href="link" title="Footnote with <em>HTML</em>" data-id="123">Link</a>)";
+    std::string result = sanitize_html(input);
+    assert(result.find("title=") == std::string::npos);
+    assert(result.find("data-id=") == std::string::npos);
+    assert(result.find("<em>") == std::string::npos); // The title was removed, so this should be gone
+    assert(result.find("<a href=\"link\">Link</a>") != std::string::npos);
+
+    // Test data attributes with various formats
+    std::string input2 = R"(<div data-v-app="" data-type='meta' data-info=unquoted>Text</div>)";
+    std::string result2 = sanitize_html(input2);
+    assert(result2.find("data-v-app") == std::string::npos);
+    assert(result2.find("data-type") == std::string::npos);
+    assert(result2.find("data-info") == std::string::npos);
+}
+
+void test_xhtml_compliance() {
+    // Test <br> and <hr> are closed
+    std::string input = "<p>Line 1<br>Line 2<hr>End</p>";
+    std::string result = sanitize_html(input);
+    assert(result.find("<br />") != std::string::npos);
+    assert(result.find("<hr />") != std::string::npos);
+    assert(result.find("<br>") == std::string::npos);
+    assert(result.find("<hr>") == std::string::npos);
+}
+
+void test_html5_normalization() {
+    // Test figure and figcaption to div
+    std::string input = "<figure><figcaption>Caption</figcaption>Content</figure>";
+    std::string result = sanitize_html(input);
+    assert(result.find("<div class=\"figure\">") != std::string::npos);
+    assert(result.find("<div class=\"figcaption\">") != std::string::npos);
+    assert(result.find("</div>") != std::string::npos);
+    assert(result.find("<figure") == std::string::npos);
+    assert(result.find("<figcaption") == std::string::npos);
+}
+
+void test_utf8_to_entities() {
+    // Test non-ASCII characters
+    std::string input = "Smart quote: ’ Copyright: © Greek: μισθός";
+    std::string result = sanitize_html(input);
+    assert(result.find("&#8217;") != std::string::npos);
+    assert(result.find("&#169;") != std::string::npos);
+    assert(result.find("&#956;&#953;&#963;&#952;&#972;&#962;") != std::string::npos);
+}
+
+void test_removes_empty_tags() {
+    std::string input = "<h2></h2><p>  </p><p>Content</p>";
+    std::string result = sanitize_html(input);
+    assert(result.find("<h2>") == std::string::npos);
+    assert(result.find("<p>Content</p>") != std::string::npos);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -253,6 +307,11 @@ int main() {
     TEST(test_simplify_removes_junk_sections);
     TEST(test_simplify_collapses_br);
     TEST(test_simplify_removes_forms);
+    TEST(test_removes_problematic_attributes);
+    TEST(test_xhtml_compliance);
+    TEST(test_html5_normalization);
+    TEST(test_utf8_to_entities);
+    TEST(test_removes_empty_tags);
 
     std::cout << "\n✓ All sanitizer tests passed!\n";
     return 0;
