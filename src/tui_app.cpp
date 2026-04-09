@@ -15,6 +15,13 @@
 #include <regex>
 #include <thread>
 
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QImage>
+#include <QBuffer>
+
 namespace endpaper {
 
 using namespace ftxui;
@@ -142,6 +149,7 @@ void TuiApp::run() {
     std::string build_status;
     bool append_mode = false;
     bool simplify_mode = false;
+    bool keep_images_mode = false;
     bool fuzzy_search = config_.get("ui", "fuzzy_search", "false") == "true";
 
     // ── Shared Helpers ───────────────────────────────────────────────────
@@ -444,7 +452,7 @@ void TuiApp::run() {
         int staged = 0;
         for (size_t i = 0; i < emails.size(); ++i) {
             if (email_selected[i]) {
-                db_.add_chapter(book_id, emails[i].subject, emails[i].sender, sanitize_html(emails[i].html_body), base_order + staged + 1);
+                db_.add_chapter(book_id, emails[i].subject, emails[i].sender, sanitize_html(emails[i].html_body, true), base_order + staged + 1);
                 staged++;
             }
         }
@@ -648,7 +656,7 @@ void TuiApp::run() {
 
                 {
                     std::lock_guard lock(state_mutex);
-                    db_.add_chapter(book_id, ent.title, ent.author, sanitize_html(content), base_order + staged + 1);
+                    db_.add_chapter(book_id, ent.title, ent.author, sanitize_html(content, true), base_order + staged + 1);
                     staged++;
                 }
             }
@@ -840,7 +848,7 @@ void TuiApp::run() {
 
                 {
                     std::lock_guard lock(state_mutex);
-                    db_.add_chapter(book_id, art.title, art.author, sanitize_html(content), base_order + staged + 1);
+                    db_.add_chapter(book_id, art.title, art.author, sanitize_html(content, true), base_order + staged + 1);
                     staged++;
                 }
             }
@@ -1053,6 +1061,7 @@ void TuiApp::run() {
     auto input_publisher = Input(&epub_publisher, "Publisher");
     auto check_append = Checkbox("Append", &append_mode);
     auto check_simplify = Checkbox("Simplify", &simplify_mode);
+    auto check_keep_images = Checkbox("Images", &keep_images_mode);
     
     auto btn_build = Button("📖 BUILD EPUB", [&] {
         if (building || books.empty() || epub_output_path.empty()) return;
@@ -1065,23 +1074,86 @@ void TuiApp::run() {
             if (h) opath = std::string(h) + opath.substr(1); 
         }
         auto chaps = db_.get_chapters(bid);
-        std::thread([&, chaps = std::move(chaps), title, opath]() {
+        std::thread([&, chaps = std::move(chaps), title, opath, append = append_mode, simplify = simplify_mode, keepImages = keep_images_mode]() {
             try {
+                std::map<std::string, std::string> epub_images;
                 std::vector<EpubChapter> ec;
+                int image_counter = 0;
+                QNetworkAccessManager qnam;
+
                 for (const auto& c : chaps) {
-                    std::string content = simplify_mode ? simplify_html(c.content_html) : c.content_html;
+                    std::string content = c.content_html;
+                    
+                    if (keepImages) {
+                        std::regex img_re(R"RE(<img\b[^>]*src=["']([^"']+)["'][^>]*>)RE", std::regex::icase);
+                        std::string new_content = content;
+                        
+                        auto it = std::sregex_iterator(content.begin(), content.end(), img_re);
+                        for (; it != std::sregex_iterator(); ++it) {
+                            std::string full_tag = (*it)[0].str();
+                            std::string src = (*it)[1].str();
+                            bool success = false;
+                            std::string local_path;
+                            
+                            if (src.find("http") == 0) {
+                                QEventLoop loop;
+                                QNetworkRequest req((QUrl(QString::fromStdString(src))));
+                                req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+                                QNetworkReply* reply = qnam.get(req);
+                                QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+                                loop.exec();
+                                
+                                if (reply->error() == QNetworkReply::NoError) {
+                                    QByteArray data = reply->readAll();
+                                    QImage img;
+                                    if (img.loadFromData(data)) {
+                                        QByteArray jpegData;
+                                        QBuffer buffer(&jpegData);
+                                        buffer.open(QIODevice::WriteOnly);
+                                        if (img.save(&buffer, "JPEG")) {
+                                            local_path = "images/img_" + std::to_string(++image_counter) + ".jpg";
+                                            epub_images[local_path] = std::string(jpegData.constData(), jpegData.size());
+                                            success = true;
+                                        }
+                                    }
+                                }
+                                reply->deleteLater();
+                            }
+                            
+                            size_t pos = new_content.find(full_tag);
+                            if (pos != std::string::npos) {
+                                if (success) {
+                                    std::string new_tag = "<img src=\"" + local_path + "\"/>";
+                                    new_content.replace(pos, full_tag.length(), new_tag);
+                                } else {
+                                    new_content.erase(pos, full_tag.length());
+                                }
+                            }
+                        }
+                        content = new_content;
+                    }
+                    
+                    content = simplify ? simplify_html(content, keepImages) : sanitize_html(content, keepImages);
                     ec.push_back(EpubChapter{c.subject, c.sender, content});
                 }
+                
                 EpubMetadata m; m.title = title; m.author = epub_author; m.publisher = epub_publisher;
-                if (append_mode && fs::exists(opath)) EpubBuilder::append(opath, ec);
-                else EpubBuilder::build(opath, m, ec);
+                
+                if (append && fs::exists(opath)) {
+                    EpubBuilder::append(opath, ec, epub_images);
+                } else {
+                    EpubBuilder::build(opath, m, ec, epub_images);
+                }
+                
                 build_status = "✓ Success: " + opath;
-            } catch (const std::exception& e) { build_status = std::string("✗ Error: ") + e.what(); }
+            } catch (const std::exception& e) {
+                build_status = std::string("✗ Error: ") + e.what();
+            }
             building = false; screen.Post(Event::Custom);
         }).detach();
     });
 
-    auto build_tab = Container::Vertical({build_book_menu, input_output, input_author, input_publisher, check_append, check_simplify, btn_build});
+    auto build_tab = Container::Vertical({build_book_menu, input_output, input_author, input_publisher, check_append, check_simplify, check_keep_images, btn_build});
     auto build_renderer = Renderer(build_tab, [&] {
         Elements rows;
         rows.push_back(text("📖 BUILD") | bold | center);
@@ -1108,6 +1180,8 @@ void TuiApp::run() {
         chk_row.push_back(check_append->Render());
         chk_row.push_back(text("    "));
         chk_row.push_back(check_simplify->Render());
+        chk_row.push_back(text("    "));
+        chk_row.push_back(check_keep_images->Render());
         rows.push_back(hbox(std::move(chk_row)));
         rows.push_back(separator());
         rows.push_back(btn_build->Render() | center);

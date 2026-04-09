@@ -5,7 +5,7 @@
 
 namespace endpaper {
 
-std::string sanitize_html(const std::string& html) {
+std::string sanitize_html(const std::string& html, bool keep_images) {
     std::string result = html;
 
     // 1. Remove <style>...</style> blocks (case-insensitive, including content)
@@ -16,13 +16,13 @@ std::string sanitize_html(const std::string& html) {
     }
 
     // 2. Remove all <img ...> tags (self-closing or not)
-    {
+    if (!keep_images) {
         std::regex img_tag(R"(<img\b[^>]*\/?>)", std::regex::icase);
         result = std::regex_replace(result, img_tag, "");
     }
 
     // 3. Remove all <picture>...</picture> blocks
-    {
+    if (!keep_images) {
         std::regex picture_block(R"(<picture[^>]*>[\s\S]*?</picture\s*>)",
                                  std::regex::icase);
         result = std::regex_replace(result, picture_block, "");
@@ -75,9 +75,9 @@ std::string sanitize_html(const std::string& html) {
     return result;
 }
 
-std::string simplify_html(const std::string& html) {
+std::string simplify_html(const std::string& html, bool keep_images) {
     // 1. Start with normal sanitization (removes images, styles, scripts)
-    std::string result = sanitize_html(html);
+    std::string result = sanitize_html(html, keep_images);
 
     // 2. Remove common newsletter junk blocks (Unsubscribe, Manage, etc.)
     // We target blocks (div/table/section) that contain these keywords nearby.
@@ -123,19 +123,12 @@ std::string simplify_html(const std::string& html) {
         result = std::regex_replace(result, iframe_block, "");
     }
 
-    // 4. Strip ALL remaining attributes from allowed tags (p, h1-h6, blockquote, a, etc.)
-    // This makes the HTML purely semantic.
+    // 4. Strip ALL remaining attributes from text structure tags, BUT preserve <a> and <img>
     {
-        // Matches any attribute (key="value" 0r key='value' or key=value)
-        std::regex attr_regex(R"(\s+[a-z-]+(\s*=\s*("[^"]*"|'[^']*'|[^>\s]+))?)",
-                             std::regex::icase);
-        
-        // We only want to remove attributes from our preserved tags.
-        // This regex is slightly tricky without a parser, but since we already
-        // stripped most tags, we can just remove all attributes from all remaining tags
-        // by looking for anything inside <...> after the tag name.
-        std::regex tag_content(R"(<([a-z1-6]+)\b[^>]*?(/?)>)", std::regex::icase);
-        result = std::regex_replace(result, tag_content, "<$1$2>");
+        // Target specifically text and block elements for attribute stripping,
+        // avoiding 'a' and 'img' which inherently require attributes (href / src)
+        std::regex attr_stripper(R"(<(p|b|i|em|strong|h[1-6]|blockquote|ul|ol|li)\b[^>]*?(/?)>)", std::regex::icase);
+        result = std::regex_replace(result, attr_stripper, "<$1$2>");
     }
 
     // 5. Final cleanup
