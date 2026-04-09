@@ -9,6 +9,13 @@
 #include <QStandardPaths>
 #include <filesystem>
 #include <iostream>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QImage>
+#include <QBuffer>
+#include <regex>
 
 using namespace endpaper;
 
@@ -277,7 +284,7 @@ void EndpaperBridge::stageSelectedEmails() {
                 m_selectedBookId,
                 emails[i].subject,
                 emails[i].sender,
-                sanitize_html(emails[i].html_body),
+                sanitize_html(emails[i].html_body, true),
                 baseOrder + staged + 1
             );
             staged++;
@@ -446,7 +453,7 @@ void EndpaperBridge::stageSelectedMiniflux() {
                     m_selectedBookId,
                     entries[i].title,
                     entries[i].author,
-                    sanitize_html(content),
+                    sanitize_html(content, true),
                     baseOrder + staged + 1
                 );
                 staged++;
@@ -576,7 +583,7 @@ void EndpaperBridge::stageSelectedRss() {
                     m_selectedBookId,
                     entries[i].title,
                     entries[i].author,
-                    sanitize_html(content),
+                    sanitize_html(content, true),
                     baseOrder + staged + 1
                 );
                 staged++;
@@ -613,7 +620,7 @@ static std::string slugify(const std::string& s) {
     return result.empty() ? "book" : result;
 }
 
-void EndpaperBridge::buildEpub(const QString& author, const QString& publisher, const QString& extraPath, bool append, bool simplify) {
+void EndpaperBridge::buildEpub(const QString& author, const QString& publisher, const QString& extraPath, bool append, bool simplify, bool keepImages) {
     if (!m_db || m_selectedBookId == -1 || isBusy()) return;
     
     auto books = m_db->list_books();
@@ -663,11 +670,67 @@ void EndpaperBridge::buildEpub(const QString& author, const QString& publisher, 
     std::string stdAuthor = author.toStdString();
     std::string stdPublisher = publisher.toStdString();
     
-    std::thread([this, bookTitle, outPath, stdAuthor, stdPublisher, chapters, append, simplify]() {
+    std::thread([this, bookTitle, outPath, stdAuthor, stdPublisher, chapters, append, simplify, keepImages]() {
         try {
+            std::map<std::string, std::string> epub_images;
             std::vector<EpubChapter> epubChapters;
+            int image_counter = 0;
+            
+            QNetworkAccessManager qnam;
+            
             for (const auto& c : chapters) {
-                std::string content = simplify ? simplify_html(c.content_html) : c.content_html;
+                std::string content = c.content_html;
+                
+                if (keepImages) {
+                    std::regex img_re(R"RE(<img\b[^>]*src=["']([^"']+)["'][^>]*>)RE", std::regex::icase);
+                    std::string new_content = content;
+                    
+                    auto it = std::sregex_iterator(content.begin(), content.end(), img_re);
+                    for (; it != std::sregex_iterator(); ++it) {
+                        std::string full_tag = (*it)[0].str();
+                        std::string src = (*it)[1].str();
+                        bool success = false;
+                        std::string local_path;
+                        
+                        if (src.find("http") == 0) {
+                            QEventLoop loop;
+                            QNetworkRequest req((QUrl(QString::fromStdString(src))));
+                            req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+                            QNetworkReply* reply = qnam.get(req);
+                            QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+                            loop.exec();
+                            
+                            if (reply->error() == QNetworkReply::NoError) {
+                                QByteArray data = reply->readAll();
+                                QImage img;
+                                if (img.loadFromData(data)) {
+                                    QByteArray jpegData;
+                                    QBuffer buffer(&jpegData);
+                                    buffer.open(QIODevice::WriteOnly);
+                                    if (img.save(&buffer, "JPEG")) {
+                                        local_path = "images/img_" + std::to_string(++image_counter) + ".jpg";
+                                        epub_images[local_path] = std::string(jpegData.constData(), jpegData.size());
+                                        success = true;
+                                    }
+                                }
+                            }
+                            reply->deleteLater();
+                        }
+                        
+                        size_t pos = new_content.find(full_tag);
+                        if (pos != std::string::npos) {
+                            if (success) {
+                                std::string new_tag = "<img src=\"" + local_path + "\"/>";
+                                new_content.replace(pos, full_tag.length(), new_tag);
+                            } else {
+                                new_content.erase(pos, full_tag.length());
+                            }
+                        }
+                    }
+                    content = new_content;
+                }
+                
+                content = simplify ? simplify_html(content, keepImages) : sanitize_html(content, keepImages);
                 epubChapters.push_back({c.subject, c.sender, content});
             }
             
@@ -677,9 +740,9 @@ void EndpaperBridge::buildEpub(const QString& author, const QString& publisher, 
             meta.publisher = stdPublisher;
             
             if (append && std::filesystem::exists(outPath)) {
-                EpubBuilder::append(outPath, epubChapters);
+                EpubBuilder::append(outPath, epubChapters, epub_images);
             } else {
-                EpubBuilder::build(outPath, meta, epubChapters);
+                EpubBuilder::build(outPath, meta, epubChapters, epub_images);
             }
             
             QMetaObject::invokeMethod(this, [this, outPath]() {

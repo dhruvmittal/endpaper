@@ -282,6 +282,25 @@ void test_empty_chapters_throws() {
     assert(threw);
 }
 
+void test_image_inclusion() {
+    fs::path out = TEST_DIR / "test_images.epub";
+
+    EpubMetadata meta{.title = "Images Test", .author = "Author"};
+    std::vector<EpubChapter> chapters = {
+        {"Ch1", "a@b.com", "<p>one</p><img src=\"images/test.jpg\"/>"},
+    };
+    std::map<std::string, std::string> images = {
+        {"images/test.jpg", "fake_jpeg_data"}
+    };
+
+    EpubBuilder::build(out, meta, chapters, images);
+
+    assert(zip_has_entry(out, "OEBPS/images/test.jpg"));
+    std::string opf = read_zip_file(out, "OEBPS/content.opf");
+    assert(opf.find("media-type=\"image/jpeg\"") != std::string::npos);
+    assert(opf.find("href=\"images/test.jpg\"") != std::string::npos);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -300,6 +319,7 @@ int main() {
     TEST(test_append_to_epub);
     TEST(test_atomic_write);
     TEST(test_empty_chapters_throws);
+    TEST(test_image_inclusion);
 
     teardown();
 

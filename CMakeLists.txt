@@ -59,6 +59,7 @@ target_include_directories(endpaper PRIVATE
 
 target_link_libraries(endpaper PRIVATE
     Qt6::Core
+    Qt6::Gui
     Qt6::Network
     KPim6::Mime
     KPim6::AkonadiCore

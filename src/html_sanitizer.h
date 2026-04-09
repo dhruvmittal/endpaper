@@ -13,11 +13,11 @@ namespace endpaper {
 ///
 /// Preserves structural HTML: <p>, <br>, <h1>-<h6>, <ul>, <ol>, <li>,
 /// <a>, <blockquote>, <div>, <span>, <table>, <tr>, <td>, <th>, <pre>, <code>
-[[nodiscard]] std::string sanitize_html(const std::string& html);
+[[nodiscard]] std::string sanitize_html(const std::string& html, bool keep_images = false);
 
 /// Aggressively simplify HTML for a "distraction-free" EPUB.
 /// Removes almost all layout tags (div, table, etc.) and junk (Unsubscribe etc.)
-[[nodiscard]] std::string simplify_html(const std::string& html);
+[[nodiscard]] std::string simplify_html(const std::string& html, bool keep_images = false);
 
 /// Convert plain text to simple HTML (wrap lines in <p> tags).
 [[nodiscard]] std::string plain_text_to_html(const std::string& text);

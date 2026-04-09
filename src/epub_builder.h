@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <map>
 
 namespace endpaper {
 
@@ -27,18 +28,21 @@ public:
     /// Uses atomic write: writes to .tmp then renames.
     static void build(const std::filesystem::path& output_path,
                       const EpubMetadata& meta,
-                      const std::vector<EpubChapter>& chapters);
+                      const std::vector<EpubChapter>& chapters,
+                      const std::map<std::string, std::string>& images = {});
 
     /// Append new chapters to an existing EPUB file.
     /// Extracts the archive, updates manifest/spine/toc, re-zips.
     static void append(const std::filesystem::path& epub_path,
-                       const std::vector<EpubChapter>& new_chapters);
+                       const std::vector<EpubChapter>& new_chapters,
+                       const std::map<std::string, std::string>& images = {});
 
 private:
     // EPUB 3.0 template generators
     static std::string make_container_xml();
     static std::string make_content_opf(const EpubMetadata& meta,
-                                        int chapter_count);
+                                        int chapter_count,
+                                        const std::vector<std::string>& image_paths);
     static std::string make_toc_xhtml(const std::string& title,
                                       const std::vector<EpubChapter>& chapters,
                                       int start_index = 0);
@@ -50,7 +54,8 @@ private:
     // libzip helpers
     static void create_epub_zip(const std::filesystem::path& zip_path,
                                 const EpubMetadata& meta,
-                                const std::vector<EpubChapter>& chapters);
+                                const std::vector<EpubChapter>& chapters,
+                                const std::map<std::string, std::string>& images);
 };
 
 } // namespace endpaper
