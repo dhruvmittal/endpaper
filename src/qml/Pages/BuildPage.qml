@@ -74,6 +74,14 @@ Kirigami.ScrollablePage {
             FormCard.FormDelegateSeparator {}
             
             FormCard.FormSwitchDelegate {
+                id: imagesSwitch
+                text: "Images"
+                checked: false
+            }
+            
+            FormCard.FormDelegateSeparator {}
+            
+            FormCard.FormSwitchDelegate {
                 id: simplifySwitch
                 text: "Simplify HTML"
                 checked: true
@@ -90,7 +98,8 @@ Kirigami.ScrollablePage {
                         publisherInput.text, 
                         pathInput.text, 
                         appendSwitch.checked, 
-                        simplifySwitch.checked
+                        simplifySwitch.checked,
+                        imagesSwitch.checked
                     )
                 }
             }

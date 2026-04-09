@@ -116,7 +116,7 @@ public:
     Q_INVOKABLE void moveChapterUp(qint64 chapterId);
     Q_INVOKABLE void moveChapterDown(qint64 chapterId);
     Q_INVOKABLE void reverseChapterOrder();
-    Q_INVOKABLE void buildEpub(const QString& author, const QString& publisher, const QString& outPath, bool append, bool simplify);
+    Q_INVOKABLE void buildEpub(const QString& author, const QString& publisher, const QString& outPath, bool append, bool simplify, bool keepImages);
 
     Q_INVOKABLE void pageOpened(const QString& pageName);
 
