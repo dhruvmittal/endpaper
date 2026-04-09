@@ -101,6 +101,27 @@ std::string simplify_html(const std::string& html) {
                                std::regex::icase);
         result = std::regex_replace(result, layout_tags, "");
     }
+    
+    // 3.5 Strip web forms, buttons, inputs, textareas, selects, and iframes completely
+    {
+        std::regex form_block(R"(<form\b[^>]*>[\s\S]*?</form\s*>)", std::regex::icase);
+        result = std::regex_replace(result, form_block, "");
+
+        std::regex button_block(R"(<button\b[^>]*>[\s\S]*?</button\s*>)", std::regex::icase);
+        result = std::regex_replace(result, button_block, "");
+        
+        std::regex input_tag(R"(<input\b[^>]*\/?>)", std::regex::icase);
+        result = std::regex_replace(result, input_tag, "");
+
+        std::regex textarea_block(R"(<textarea\b[^>]*>[\s\S]*?</textarea\s*>)", std::regex::icase);
+        result = std::regex_replace(result, textarea_block, "");
+
+        std::regex select_block(R"(<select\b[^>]*>[\s\S]*?</select\s*>)", std::regex::icase);
+        result = std::regex_replace(result, select_block, "");
+        
+        std::regex iframe_block(R"(<iframe\b[^>]*>[\s\S]*?</iframe\s*>)", std::regex::icase);
+        result = std::regex_replace(result, iframe_block, "");
+    }
 
     // 4. Strip ALL remaining attributes from allowed tags (p, h1-h6, blockquote, a, etc.)
     // This makes the HTML purely semantic.

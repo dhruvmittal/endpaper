@@ -210,6 +210,26 @@ void test_simplify_collapses_br() {
     assert(result.find("<br /><br /><br />") == std::string::npos);
 }
 
+void test_simplify_removes_forms() {
+    std::string input = R"(
+        <p>Before</p>
+        <form>
+            <input type="text" />
+            <button>Subscribe</button>
+        </form>
+        <button class="btn">Floating Button</button>
+        <p>After</p>
+    )";
+    std::string result = simplify_html(input);
+    assert(result.find("Before") != std::string::npos);
+    assert(result.find("After") != std::string::npos);
+    assert(result.find("Subscribe") == std::string::npos);
+    assert(result.find("Floating Button") == std::string::npos);
+    assert(result.find("<form") == std::string::npos);
+    assert(result.find("<input") == std::string::npos);
+    assert(result.find("<button") == std::string::npos);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -233,6 +253,7 @@ int main() {
     TEST(test_simplify_strips_all_attributes);
     TEST(test_simplify_removes_junk_sections);
     TEST(test_simplify_collapses_br);
+    TEST(test_simplify_removes_forms);
 
     std::cout << "\n✓ All sanitizer tests passed!\n";
     return 0;
