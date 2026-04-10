@@ -6,8 +6,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ── Build Options ──────────────────────────────────────────────────────────
+option(BUILD_TUI "Build TUI application" ON)
+option(BUILD_GUI "Build GUI application (Qt/Kirigami)" ON)
+
 # ── Qt6 (required by Akonadi, GUI, Network) ────────────────────────────────
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2)
+if (BUILD_GUI)
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2)
+else()
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Network)
+endif()
 set(CMAKE_AUTOMOC ON)
 
 # ── Extra CMake Modules (required by KDE Frameworks) ──────────────────────
@@ -18,7 +26,9 @@ set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH} ${CMAKE_MODULE_PATH})
 find_package(KPim6Mime REQUIRED)
 find_package(KPim6Akonadi REQUIRED)
 find_package(KPim6AkonadiMime REQUIRED)
-find_package(KF6 REQUIRED COMPONENTS Kirigami I18n)
+if (BUILD_GUI)
+    find_package(KF6 REQUIRED COMPONENTS Kirigami I18n)
+endif()
 
 # ── Kirigami (runtime-only, discovered via QML2_IMPORT_PATH) ──────────────
 
@@ -49,7 +59,8 @@ set(ENDPAPER_SOURCES
     src/tui_app.cpp
 )
 
-add_executable(endpaper ${ENDPAPER_SOURCES})
+if (BUILD_TUI)
+    add_executable(endpaper ${ENDPAPER_SOURCES})
 
 target_include_directories(endpaper PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -77,7 +88,9 @@ target_link_directories(endpaper PRIVATE
     ${LIBZIP_LIBRARY_DIRS}
 )
 
-target_compile_options(endpaper PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(endpaper PRIVATE -Wall -Wextra -Wpedantic)
+    install(TARGETS endpaper DESTINATION bin)
+endif()
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 option(BUILD_TESTS "Build tests" ON)
@@ -87,9 +100,10 @@ if(BUILD_TESTS)
 endif()
 
 # ── install ────────────────────────────────────────────────────────────────
-install(TARGETS endpaper DESTINATION bin)
+# Moved inside target blocks
 
 # ── GUI executable ─────────────────────────────────────────────────────────
+if (BUILD_GUI)
 
 qt_add_executable(endpaper-qt
     src/qt_main.cpp
@@ -136,12 +150,13 @@ target_link_libraries(endpaper-qt PRIVATE
 
 target_link_directories(endpaper-qt PRIVATE
     ${SQLITE3_LIBRARY_DIRS}
-    ${LIBZIP_LIBRARY_DIRS}
 )
+    install(TARGETS endpaper-qt DESTINATION bin)
+endif()
 
 # ── Unit tests ─────────────────────────────────────────────────────────────
-add_executable(test_html_extractor tests/test_html_extractor.cpp src/html_extractor.cpp)
-target_link_libraries(test_html_extractor PRIVATE Qt6::Core Qt6::Network)
-target_include_directories(test_html_extractor PRIVATE src)
-
-install(TARGETS endpaper-qt DESTINATION bin)
+if(BUILD_TESTS)
+    add_executable(test_html_extractor tests/test_html_extractor.cpp src/html_extractor.cpp)
+    target_link_libraries(test_html_extractor PRIVATE Qt6::Core Qt6::Network)
+    target_include_directories(test_html_extractor PRIVATE src)
+endif()

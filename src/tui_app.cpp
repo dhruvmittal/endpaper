@@ -499,12 +499,26 @@ void TuiApp::run() {
     kmail_book_opt.radiobox.on_change = [&] { update_epub_path(); };
     auto kmail_book_dropdown = Dropdown(kmail_book_opt);
 
-    auto kmail_tab = Container::Vertical({
-        Container::Horizontal({btn_fetch_folders, btn_fetch_emails, kmail_filter_wrapper}),
-        folder_menu,
-        Container::Horizontal({btn_kmail_select_all, btn_kmail_deselect_all, btn_stage_kmail, kmail_book_dropdown}),
-        email_toggle
-    });
+    int kmail_sel1 = 0;
+    int kmail_sel2 = 0;
+    int kmail_sel_main = 0;
+    Components kmail_row1;
+    kmail_row1.push_back(btn_fetch_folders);
+    kmail_row1.push_back(btn_fetch_emails);
+    kmail_row1.push_back(kmail_filter_wrapper);
+
+    Components kmail_row2;
+    kmail_row2.push_back(btn_kmail_select_all);
+    kmail_row2.push_back(btn_kmail_deselect_all);
+    kmail_row2.push_back(btn_stage_kmail);
+    kmail_row2.push_back(kmail_book_dropdown);
+
+    Components kmail_main;
+    kmail_main.push_back(Container::Horizontal(kmail_row1, &kmail_sel1));
+    kmail_main.push_back(folder_menu);
+    kmail_main.push_back(Container::Horizontal(kmail_row2, &kmail_sel2));
+    kmail_main.push_back(email_toggle);
+    auto kmail_tab = Container::Vertical(kmail_main, &kmail_sel_main);
 
     auto kmail_renderer = Renderer(kmail_tab, [&] {
         int kmail_sel_count = 0;
@@ -709,12 +723,27 @@ void TuiApp::run() {
     miniflux_book_opt.radiobox.on_change = [&] { update_epub_path(); };
     auto miniflux_book_dropdown = Dropdown(miniflux_book_opt);
 
-    auto miniflux_tab = Container::Vertical({
-        Container::Horizontal({btn_fetch_mini_cats, btn_fetch_mini_entries, filter_toggle_mini, mini_filter_wrapper}),
-        miniflux_category_menu,
-        Container::Horizontal({btn_mini_select_all, btn_mini_deselect_all, btn_stage_mini, miniflux_book_dropdown}),
-        mini_entry_toggle
-    });
+    int mini_sel1 = 0;
+    int mini_sel2 = 0;
+    int mini_sel_main = 0;
+    Components mini_row1;
+    mini_row1.push_back(btn_fetch_mini_cats);
+    mini_row1.push_back(btn_fetch_mini_entries);
+    mini_row1.push_back(filter_toggle_mini);
+    mini_row1.push_back(mini_filter_wrapper);
+
+    Components mini_row2;
+    mini_row2.push_back(btn_mini_select_all);
+    mini_row2.push_back(btn_mini_deselect_all);
+    mini_row2.push_back(btn_stage_mini);
+    mini_row2.push_back(miniflux_book_dropdown);
+
+    Components mini_main;
+    mini_main.push_back(Container::Horizontal(mini_row1, &mini_sel1));
+    mini_main.push_back(miniflux_category_menu);
+    mini_main.push_back(Container::Horizontal(mini_row2, &mini_sel2));
+    mini_main.push_back(mini_entry_toggle);
+    auto miniflux_tab = Container::Vertical(mini_main, &mini_sel_main);
 
     auto miniflux_renderer = Renderer(miniflux_tab, [&] {
         int mini_sel_count = 0;
@@ -900,13 +929,33 @@ void TuiApp::run() {
     rss_book_opt.radiobox.on_change = [&] { update_epub_path(); };
     auto rss_book_dropdown = Dropdown(rss_book_opt);
 
-    auto rss_tab = Container::Vertical({
-        Container::Horizontal({Input(&new_feed_title, "Title"), Input(&new_feed_url, "URL"), btn_add_rss_feed}),
-        rss_feed_menu,
-        Container::Horizontal({btn_fetch_rss, btn_remove_rss_feed, rss_filter_wrapper}),
-        Container::Horizontal({btn_rss_select_all, btn_rss_deselect_all, btn_stage_rss, rss_book_dropdown}),
-        rss_toggle
-    });
+    int rss_sel1 = 0;
+    int rss_sel3 = 0;
+    int rss_sel4 = 0;
+    int rss_sel_main = 0;
+    Components rss_row1;
+    rss_row1.push_back(Input(&new_feed_title, "Title"));
+    rss_row1.push_back(Input(&new_feed_url, "URL"));
+    rss_row1.push_back(btn_add_rss_feed);
+
+    Components rss_row3;
+    rss_row3.push_back(btn_fetch_rss);
+    rss_row3.push_back(btn_remove_rss_feed);
+    rss_row3.push_back(rss_filter_wrapper);
+
+    Components rss_row4;
+    rss_row4.push_back(btn_rss_select_all);
+    rss_row4.push_back(btn_rss_deselect_all);
+    rss_row4.push_back(btn_stage_rss);
+    rss_row4.push_back(rss_book_dropdown);
+
+    Components rss_main;
+    rss_main.push_back(Container::Horizontal(rss_row1, &rss_sel1));
+    rss_main.push_back(rss_feed_menu);
+    rss_main.push_back(Container::Horizontal(rss_row3, &rss_sel3));
+    rss_main.push_back(Container::Horizontal(rss_row4, &rss_sel4));
+    rss_main.push_back(rss_toggle);
+    auto rss_tab = Container::Vertical(rss_main, &rss_sel_main);
 
     auto rss_renderer = Renderer(rss_tab, [&] {
         int rss_sel_count = 0;
@@ -982,7 +1031,7 @@ void TuiApp::run() {
 
     auto btn_create_book = Button("+ Create Book", [&] {
         if (new_book_title.empty()) return;
-        db_.create_book(new_book_title); new_book_title.clear(); refresh_books(); status_message = "Book created!";
+        (void)db_.create_book(new_book_title); new_book_title.clear(); refresh_books(); status_message = "Book created!";
     });
 
     auto btn_delete_book = Button("🗑 Delete", [&] {
@@ -1021,10 +1070,34 @@ void TuiApp::run() {
         refresh_chapters(); status_message = "Order reversed";
     });
 
-    auto books_tab = Container::Horizontal({
-        Container::Vertical({book_menu, Container::Horizontal({Input(&new_book_title, "New Book"), btn_create_book}), btn_delete_book}),
-        Container::Vertical({chapter_menu_wrapper, Container::Horizontal({btn_move_up, btn_move_down, btn_reverse_chapters, btn_delete_chapter})})
-    });
+    int books_sel1_h = 0;
+    int books_sel1_v = 0;
+    int books_sel2_h = 0;
+    int books_sel2_v = 0;
+    int books_sel_main = 0;
+    Components books_row1_h;
+    books_row1_h.push_back(Input(&new_book_title, "New Book"));
+    books_row1_h.push_back(btn_create_book);
+    
+    Components books_row1;
+    books_row1.push_back(book_menu);
+    books_row1.push_back(Container::Horizontal(books_row1_h, &books_sel1_h));
+    books_row1.push_back(btn_delete_book);
+
+    Components books_row2_h;
+    books_row2_h.push_back(btn_move_up);
+    books_row2_h.push_back(btn_move_down);
+    books_row2_h.push_back(btn_reverse_chapters);
+    books_row2_h.push_back(btn_delete_chapter);
+
+    Components books_row2;
+    books_row2.push_back(chapter_menu_wrapper);
+    books_row2.push_back(Container::Horizontal(books_row2_h, &books_sel2_h));
+
+    Components books_main;
+    books_main.push_back(Container::Vertical(books_row1, &books_sel1_v));
+    books_main.push_back(Container::Vertical(books_row2, &books_sel2_v));
+    auto books_tab = Container::Horizontal(books_main, &books_sel_main);
 
     auto books_renderer = Renderer(books_tab, [&] {
         Elements left_rows;
@@ -1153,7 +1226,17 @@ void TuiApp::run() {
         }).detach();
     });
 
-    auto build_tab = Container::Vertical({build_book_menu, input_output, input_author, input_publisher, check_append, check_simplify, check_keep_images, btn_build});
+    int build_sel_main = 0;
+    Components build_main;
+    build_main.push_back(build_book_menu);
+    build_main.push_back(input_output);
+    build_main.push_back(input_author);
+    build_main.push_back(input_publisher);
+    build_main.push_back(check_append);
+    build_main.push_back(check_simplify);
+    build_main.push_back(check_keep_images);
+    build_main.push_back(btn_build);
+    auto build_tab = Container::Vertical(build_main, &build_sel_main);
     auto build_renderer = Renderer(build_tab, [&] {
         Elements rows;
         rows.push_back(text("📖 BUILD") | bold | center);
@@ -1244,13 +1327,23 @@ void TuiApp::run() {
         status_message = "Fetching settings saved!";
     });
 
-    auto settings_tab = Container::Vertical({
-        input_miniflux_url, input_miniflux_token, btn_save_miniflux,
-        input_rss_max, btn_save_rss,
-        btn_save_fuzzy,
-        check_auto_akonadi, check_auto_miniflux, check_remember_config, btn_save_behavior,
-        check_resolve_stubs, input_stub_threshold, input_request_delay, btn_save_fetching
-    });
+    int settings_sel_main = 0;
+    Components settings_main;
+    settings_main.push_back(input_miniflux_url);
+    settings_main.push_back(input_miniflux_token);
+    settings_main.push_back(btn_save_miniflux);
+    settings_main.push_back(input_rss_max);
+    settings_main.push_back(btn_save_rss);
+    settings_main.push_back(btn_save_fuzzy);
+    settings_main.push_back(check_auto_akonadi);
+    settings_main.push_back(check_auto_miniflux);
+    settings_main.push_back(check_remember_config);
+    settings_main.push_back(btn_save_behavior);
+    settings_main.push_back(check_resolve_stubs);
+    settings_main.push_back(input_stub_threshold);
+    settings_main.push_back(input_request_delay);
+    settings_main.push_back(btn_save_fetching);
+    auto settings_tab = Container::Vertical(settings_main, &settings_sel_main);
     auto settings_renderer = Renderer(settings_tab, [&] {
         Elements rows;
         rows.push_back(text("⚙ SETTINGS") | bold | center);
@@ -1314,9 +1407,20 @@ void TuiApp::run() {
 
     std::vector<std::string> tab_labels = {" 📧 KMail ", " 🌀 Miniflux ", " 🌐 RSS ", " 📚 Books ", " 📖 Build ", " ⚙ Settings "};
     auto tab_toggle = Toggle(&tab_labels, &active_tab);
-    auto tab_content = Container::Tab({kmail_renderer, miniflux_renderer, rss_renderer, books_renderer, build_renderer, settings_renderer}, &active_tab);
+    Components tab_comps;
+    tab_comps.push_back(kmail_renderer);
+    tab_comps.push_back(miniflux_renderer);
+    tab_comps.push_back(rss_renderer);
+    tab_comps.push_back(books_renderer);
+    tab_comps.push_back(build_renderer);
+    tab_comps.push_back(settings_renderer);
+    auto tab_content = Container::Tab(tab_comps, &active_tab);
     
-    auto main_container = Container::Vertical({tab_toggle, tab_content});
+    int main_sel_main = 0;
+    Components main_main;
+    main_main.push_back(tab_toggle);
+    main_main.push_back(tab_content);
+    auto main_container = Container::Vertical(main_main, &main_sel_main);
     auto main_component = CatchEvent(main_container, [&](Event event) {
         int prev_tab = active_tab;
         bool handled = false;
