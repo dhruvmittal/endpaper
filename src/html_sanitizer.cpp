@@ -2,6 +2,7 @@
 
 #include <regex>
 #include <sstream>
+#include <cstdint>
 
 namespace endpaper {
 
@@ -66,7 +67,93 @@ std::string sanitize_html(const std::string& html, bool keep_images) {
         result = std::regex_replace(result, comment, "");
     }
 
-    // 8. Collapse multiple blank lines into one
+    // 8. Remove title="..." and data-*="..." attributes
+    {
+        std::regex problematic_attr(R"(\s+(title|data-[a-z0-9\-]+)\s*=\s*"[^"]*")",
+                                     std::regex::icase);
+        result = std::regex_replace(result, problematic_attr, "");
+    }
+    {
+        std::regex problematic_attr_sq(R"(\s+(title|data-[a-z0-9\-]+)\s*=\s*'[^']*')",
+                                        std::regex::icase);
+        result = std::regex_replace(result, problematic_attr_sq, "");
+    }
+    // And also ensure no title/data attributes remain if they were unquoted
+    {
+        std::regex unquoted_attr(R"(\s+(title|data-[a-z0-9\-]+)\s*=[^\s/>]+)",
+                                 std::regex::icase);
+        result = std::regex_replace(result, unquoted_attr, "");
+    }
+
+    // 9. Fix self-closing tags (XHTML compliance)
+    {
+        // Convert <br> to <br /> (case-insensitive, avoiding already closed ones)
+        std::regex br_tag(R"(<br\s*(?!/)>)", std::regex::icase);
+        result = std::regex_replace(result, br_tag, "<br />");
+        
+        // Convert <hr> to <hr />
+        std::regex hr_tag(R"(<hr\s*(?!/)>)", std::regex::icase);
+        result = std::regex_replace(result, hr_tag, "<hr />");
+    }
+
+    // 10. Normalize HTML5 elements (figure, figcaption) to <div> for old readers
+    {
+        std::regex figure_open(R"(<figure\b[^>]*>)", std::regex::icase);
+        result = std::regex_replace(result, figure_open, "<div class=\"figure\">");
+        
+        std::regex figure_close(R"(</figure\s*?>)", std::regex::icase);
+        result = std::regex_replace(result, figure_close, "</div>");
+        
+        std::regex figcaption_open(R"(<figcaption\b[^>]*>)", std::regex::icase);
+        result = std::regex_replace(result, figcaption_open, "<div class=\"figcaption\">");
+        
+        std::regex figcaption_close(R"(</figcaption\s*?>)", std::regex::icase);
+        result = std::regex_replace(result, figcaption_close, "</div>");
+    }
+
+    // 11. Convert non-ASCII UTF-8 characters to numeric entities
+    {
+        std::string escaped;
+        escaped.reserve(result.size());
+        for (size_t i = 0; i < result.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(result[i]);
+            if (c <= 127) {
+                escaped += static_cast<char>(c);
+            } else {
+                int len = 0;
+                std::uint32_t cp = 0;
+                if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1F; }
+                else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+                else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+                
+                if (len > 1 && i + len <= result.size()) {
+                    bool valid = true;
+                    for (int j = 1; j < len; ++j) {
+                        unsigned char next = static_cast<unsigned char>(result[i + j]);
+                        if ((next & 0xC0) != 0x80) { valid = false; break; }
+                        cp = (cp << 6) | (next & 0x3F);
+                    }
+                    if (valid) {
+                        escaped += "&#" + std::to_string(cp) + ";";
+                        i += len - 1;
+                    } else {
+                        escaped += static_cast<char>(c);
+                    }
+                } else {
+                    escaped += static_cast<char>(c);
+                }
+            }
+        }
+        result = std::move(escaped);
+    }
+
+    // 12. Remove empty h1-h6 and p tags
+    {
+        std::regex empty_tags(R"(<(h[1-6]|p)\b[^>]*>\s*</\1>)", std::regex::icase);
+        result = std::regex_replace(result, empty_tags, "");
+    }
+
+    // 13. Collapse multiple blank lines into one
     {
         std::regex multi_blank(R"(\n{3,})");
         result = std::regex_replace(result, multi_blank, "\n\n");
