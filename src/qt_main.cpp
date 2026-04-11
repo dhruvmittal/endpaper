@@ -66,7 +66,8 @@ int main(int argc, char* argv[]) {
     endpaper::EndpaperBridge bridge;
     bridge.init(&config, &db, &fetcher, &rss_fetcher, &miniflux_fetcher, &html_extractor);
     
-    engine.rootContext()->setContextProperty("Bridge", &bridge);
+    // Register Bridge as a singleton instance in the org.kde.endpaper module
+    qmlRegisterSingletonInstance("org.kde.endpaper", 1, 0, "Bridge", &bridge);
 
     const QUrl url_main("qrc:/org/kde/endpaper/src/qml/main.qml");
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
