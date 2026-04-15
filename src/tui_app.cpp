@@ -15,10 +15,7 @@
 #include <regex>
 #include <thread>
 
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
-#include <QEventLoop>
+#include <curl/curl.h>
 #include <QImage>
 #include <QBuffer>
 
@@ -1152,7 +1149,7 @@ void TuiApp::run() {
                 std::map<std::string, std::string> epub_images;
                 std::vector<EpubChapter> ec;
                 int image_counter = 0;
-                QNetworkAccessManager qnam;
+                // Using libcurl for image downloading below
 
                 for (const auto& c : chaps) {
                     std::string content = c.content_html;
@@ -1169,28 +1166,43 @@ void TuiApp::run() {
                             std::string local_path;
                             
                             if (src.find("http") == 0) {
-                                QEventLoop loop;
-                                QNetworkRequest req((QUrl(QString::fromStdString(src))));
-                                req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-                                QNetworkReply* reply = qnam.get(req);
-                                QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-                                loop.exec();
-                                
-                                if (reply->error() == QNetworkReply::NoError) {
-                                    QByteArray data = reply->readAll();
-                                    QImage img;
-                                    if (img.loadFromData(data)) {
-                                        QByteArray jpegData;
-                                        QBuffer buffer(&jpegData);
-                                        buffer.open(QIODevice::WriteOnly);
-                                        if (img.save(&buffer, "JPEG")) {
-                                            local_path = "images/img_" + std::to_string(++image_counter) + ".jpg";
-                                            epub_images[local_path] = std::string(jpegData.constData(), jpegData.size());
-                                            success = true;
+                                CURL* curl = curl_easy_init();
+                                if (curl) {
+                                    std::string buffer;
+                                    curl_easy_setopt(curl, CURLOPT_URL, src.c_str());
+                                    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+                                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+                                    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Endpaper/0.1 (Image Downloader; libcurl)");
+                                    
+                                    auto curl_write_cb = +[](void* contents, size_t size, size_t nmemb, void* userp) -> size_t {
+                                        size_t realsize = size * nmemb;
+                                        std::string* mem = static_cast<std::string*>(userp);
+                                        mem->append(static_cast<char*>(contents), realsize);
+                                        return realsize;
+                                    };
+                                    
+                                    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+                                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+                                    
+                                    CURLcode res = curl_easy_perform(curl);
+                                    long response_code = 0;
+                                    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+                                    
+                                    if (res == CURLE_OK && response_code == 200) {
+                                        QImage img;
+                                        if (img.loadFromData(reinterpret_cast<const uchar*>(buffer.data()), static_cast<int>(buffer.size()))) {
+                                            QByteArray jpegData;
+                                            QBuffer qbuf(&jpegData);
+                                            qbuf.open(QIODevice::WriteOnly);
+                                            if (img.save(&qbuf, "JPEG")) {
+                                                local_path = "images/img_" + std::to_string(++image_counter) + ".jpg";
+                                                epub_images[local_path] = std::string(jpegData.constData(), jpegData.size());
+                                                success = true;
+                                            }
                                         }
                                     }
+                                    curl_easy_cleanup(curl);
                                 }
-                                reply->deleteLater();
                             }
                             
                             size_t pos = new_content.find(full_tag);

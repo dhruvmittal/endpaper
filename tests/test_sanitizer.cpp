@@ -209,6 +209,50 @@ void test_simplify_collapses_br() {
     assert(result.find("<br /><br /><br />") == std::string::npos);
 }
 
+// ── XHTML compliance tests ───────────────────────────────────────────────
+// These guard against regressions that produce EPUB chapters that cannot be
+// opened by strict XML-based e-readers (e.g. Crosspoint, Kobo).
+
+void test_xhtml_nbsp_replaced() {
+    // &nbsp; is HTML-only; XML parsers reject it as "undefined entity".
+    // The sanitizer must replace it with the numeric equivalent &#160;.
+    std::string input = "<p>word&nbsp;word</p>";
+    std::string result = sanitize_html(input, /*keep_images=*/false);
+    assert(result.find("&nbsp;") == std::string::npos && "&nbsp; must not appear in output");
+    assert(result.find("&#160;") != std::string::npos && "&#160; must replace &nbsp;");
+}
+
+void test_xhtml_img_self_closed_when_keep_images() {
+    // When images are kept, <img src="…"> must be emitted as <img src="…"/>
+    // (void element, self-closing) so the XHTML is well-formed XML.
+    std::string input = "<p>Text</p><img src=\"photo.jpg\">";
+    std::string result = sanitize_html(input, /*keep_images=*/true);
+    assert(result.find("<img") != std::string::npos && "img tag must be present");
+    // Every <img must be followed eventually by /> not by just >
+    auto pos = result.find("<img");
+    while (pos != std::string::npos) {
+        auto close = result.find('>', pos);
+        assert(close != std::string::npos);
+        assert(result[close - 1] == '/' && "img must be self-closed");
+        pos = result.find("<img", pos + 1);
+    }
+}
+
+void test_xhtml_already_self_closed_img_unchanged() {
+    // An already-self-closed <img/> must not be double-closed to <img//>
+    std::string input = "<p>a</p><img src=\"x.jpg\"/>";
+    std::string result = sanitize_html(input, /*keep_images=*/true);
+    assert(result.find("//>") == std::string::npos && "must not produce //>");
+}
+
+void test_xhtml_br_self_closed() {
+    // <br> (no slash) must become <br/> for XHTML validity.
+    std::string input = "<p>a<br>b</p>";
+    std::string result = sanitize_html(input, /*keep_images=*/false);
+    assert(result.find("<br>") == std::string::npos && "bare <br> must not appear");
+    assert(result.find("<br/>") != std::string::npos && "<br/> must appear");
+}
+
 void test_simplify_removes_forms() {
     std::string input = R"(
         <p>Before</p>
@@ -253,6 +297,10 @@ int main() {
     TEST(test_simplify_removes_junk_sections);
     TEST(test_simplify_collapses_br);
     TEST(test_simplify_removes_forms);
+    TEST(test_xhtml_nbsp_replaced);
+    TEST(test_xhtml_img_self_closed_when_keep_images);
+    TEST(test_xhtml_already_self_closed_img_unchanged);
+    TEST(test_xhtml_br_self_closed);
 
     std::cout << "\n✓ All sanitizer tests passed!\n";
     return 0;

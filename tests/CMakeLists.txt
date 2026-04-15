@@ -4,6 +4,7 @@ add_executable(test_sanitizer
     ${CMAKE_SOURCE_DIR}/src/html_sanitizer.cpp
 )
 target_include_directories(test_sanitizer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_sanitizer PRIVATE ${LEXBOR_LIBRARIES})
 target_compile_options(test_sanitizer PRIVATE -Wall -Wextra)
 add_test(NAME test_sanitizer COMMAND test_sanitizer)
 
@@ -21,6 +22,8 @@ target_include_directories(test_epub PRIVATE
 target_link_libraries(test_epub PRIVATE
     ${LIBZIP_LIBRARIES}
     ${SQLITE3_LIBRARIES}
+    ${LEXBOR_LIBRARIES}
+    pugixml::pugixml
 )
 target_link_directories(test_epub PRIVATE
     ${LIBZIP_LIBRARY_DIRS}
@@ -43,7 +46,7 @@ target_include_directories(test_rss PRIVATE
 target_link_libraries(test_rss PRIVATE
     ${SQLITE3_LIBRARIES}
     pugixml::pugixml
-    Qt6::Network
+    CURL::libcurl
 )
 target_link_directories(test_rss PRIVATE
     ${SQLITE3_LIBRARY_DIRS}
@@ -64,6 +67,8 @@ target_include_directories(test_append_comprehensive PRIVATE
 target_link_libraries(test_append_comprehensive PRIVATE
     ${LIBZIP_LIBRARIES}
     ${SQLITE3_LIBRARIES}
+    ${LEXBOR_LIBRARIES}
+    pugixml::pugixml
 )
 target_link_directories(test_append_comprehensive PRIVATE
     ${LIBZIP_LIBRARY_DIRS}

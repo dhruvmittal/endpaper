@@ -45,6 +45,23 @@ pkg_check_modules(LIBZIP REQUIRED libzip)
 # ── pugixml (for RSS parsing) ──────────────────────────────────────────────
 find_package(pugixml REQUIRED)
 
+# ── Lexbor (for HTML sanitation) ───────────────────────────────────────────
+find_path(LEXBOR_INCLUDE_DIR NAMES lexbor/html/parser.h)
+find_library(LEXBOR_LIBRARY NAMES lexbor)
+if (LEXBOR_INCLUDE_DIR AND LEXBOR_LIBRARY)
+    set(LEXBOR_FOUND TRUE)
+    set(LEXBOR_INCLUDE_DIRS ${LEXBOR_INCLUDE_DIR})
+    set(LEXBOR_LIBRARIES ${LEXBOR_LIBRARY})
+else()
+    message(FATAL_ERROR "Lexbor library or headers not found")
+endif()
+
+# ── CURL (for networking) ──────────────────────────────────────────────────
+find_package(CURL REQUIRED)
+
+# ── nlohmann_json (for JSON parsing) ───────────────────────────────────────
+find_package(nlohmann_json REQUIRED)
+
 # ── Source files ───────────────────────────────────────────────────────────
 set(ENDPAPER_SOURCES
     src/main.cpp
@@ -71,7 +88,7 @@ target_include_directories(endpaper PRIVATE
 target_link_libraries(endpaper PRIVATE
     Qt6::Core
     Qt6::Gui
-    Qt6::Network
+    CURL::libcurl
     KPim6::Mime
     KPim6::AkonadiCore
     KPim6::AkonadiMime
@@ -81,6 +98,7 @@ target_link_libraries(endpaper PRIVATE
     pugixml::pugixml
     ${SQLITE3_LIBRARIES}
     ${LIBZIP_LIBRARIES}
+    ${LEXBOR_LIBRARIES}
 )
 
 target_link_directories(endpaper PRIVATE
@@ -143,9 +161,12 @@ target_link_libraries(endpaper-qt PRIVATE
     Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2
     KF6::I18n
     KPim6::Mime KPim6::AkonadiCore KPim6::AkonadiMime
+    CURL::libcurl
+    nlohmann_json::nlohmann_json
     pugixml::pugixml
     ${SQLITE3_LIBRARIES}
     ${LIBZIP_LIBRARIES}
+    ${LEXBOR_LIBRARIES}
 )
 
 target_link_directories(endpaper-qt PRIVATE
@@ -157,6 +178,6 @@ endif()
 # ── Unit tests ─────────────────────────────────────────────────────────────
 if(BUILD_TESTS)
     add_executable(test_html_extractor tests/test_html_extractor.cpp src/html_extractor.cpp)
-    target_link_libraries(test_html_extractor PRIVATE Qt6::Core Qt6::Network)
+    target_link_libraries(test_html_extractor PRIVATE Qt6::Core CURL::libcurl)
     target_include_directories(test_html_extractor PRIVATE src)
 endif()

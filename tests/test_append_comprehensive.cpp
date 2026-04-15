@@ -163,15 +163,15 @@ void test_append_with_special_chars() {
     EpubBuilder::build(epub, meta, initial);
 
     std::vector<EpubChapter> appended = {
-        {"Append & Special", "s@p.com", "<p>Special characters: & < ></p>"}
+        {"Append & Special", "s@p.com", sanitize_html("<p>Special characters: & < ></p>")}
     };
     EpubBuilder::append(epub, appended);
 
     std::string toc = read_zip_file(epub, "OEBPS/toc.xhtml");
-    assert(toc.find("Append & Special") != std::string::npos);
+    assert(toc.find("Append &amp; Special") != std::string::npos);
 
     std::string ch1 = read_zip_file(epub, "OEBPS/chapter_1.xhtml");
-    assert(ch1.find("Special characters: & < >") != std::string::npos);
+    assert(ch1.find("Special characters: &amp; &lt; &gt;") != std::string::npos);
 }
 
 void test_append_to_missing_file_throws() {

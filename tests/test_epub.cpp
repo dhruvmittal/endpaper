@@ -10,6 +10,7 @@
 #include <string>
 
 #include <zip.h>
+#include <pugixml.hpp>
 
 namespace fs = std::filesystem;
 using namespace endpaper;
@@ -301,6 +302,68 @@ void test_image_inclusion() {
     assert(opf.find("href=\"images/test.jpg\"") != std::string::npos);
 }
 
+// ── XHTML validity tests ──────────────────────────────────────────────────
+// These guard against regressions where generated chapter files are not
+// well-formed XML and therefore cannot be opened by strict e-readers.
+
+/// Parse an XHTML string with pugixml and assert it is well-formed XML.
+static void assert_valid_xml(const std::string& xml, const char* label) {
+    pugi::xml_document doc;
+    pugi::xml_parse_result result = doc.load_string(xml.c_str());
+    if (!result) {
+        std::cerr << "\n  XML parse error in " << label << ": "
+                  << result.description()
+                  << " at offset " << result.offset << "\n";
+        std::cerr << "  Snippet: "
+                  << xml.substr(static_cast<size_t>(std::max(0L, (long)result.offset - 40)),
+                                80)
+                  << "\n";
+    }
+    assert(result && "Chapter must be well-formed XML");
+}
+
+void test_chapters_are_valid_xml() {
+    // Build an EPUB with content that historically caused XML failures:
+    //   - &nbsp; (undefined in XML)
+    //   - <img> tags inside <figure> (not self-closed by Lexbor)
+    //   - <br> (not self-closed)
+    // The builder must produce well-formed XHTML that a strict parser accepts.
+    fs::path out = TEST_DIR / "test_xml_validity.epub";
+
+    EpubMetadata meta{.title = "XML Validity Test", .author = "Author"};
+    std::vector<EpubChapter> chapters = {
+        // Chapter 0: bare <img> and <br>
+        {"Chapter With Images", "a@b.com",
+         "<p>Text</p>"
+         "<figure><img src=\"images/img_1.jpg\"><figcaption>Caption</figcaption></figure>"
+         "<p>After<br>image</p>"},
+        // Chapter 1: &nbsp; entities
+        {"Chapter With Nbsp", "b@c.com",
+         "<p>Word&nbsp;word&nbsp;word</p>"},
+    };
+    std::map<std::string, std::string> images = {
+        {"images/img_1.jpg", "fake"}
+    };
+
+    EpubBuilder::build(out, meta, chapters, images);
+
+    // Verify every chapter parses as valid XML
+    for (int i = 0; i < (int)chapters.size(); ++i) {
+        std::string entry = "OEBPS/chapter_" + std::to_string(i) + ".xhtml";
+        std::string content = read_zip_file(out, entry.c_str());
+        assert(!content.empty() && "Chapter file must exist in EPUB");
+        assert_valid_xml(content, entry.c_str());
+    }
+
+    // Spot-check: no bare &nbsp; in any chapter
+    for (int i = 0; i < (int)chapters.size(); ++i) {
+        std::string entry = "OEBPS/chapter_" + std::to_string(i) + ".xhtml";
+        std::string content = read_zip_file(out, entry.c_str());
+        assert(content.find("&nbsp;") == std::string::npos &&
+               "&nbsp; must be replaced with &#160;");
+    }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -320,6 +383,7 @@ int main() {
     TEST(test_atomic_write);
     TEST(test_empty_chapters_throws);
     TEST(test_image_inclusion);
+    TEST(test_chapters_are_valid_xml);
 
     teardown();
 
