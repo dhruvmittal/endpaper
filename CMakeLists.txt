@@ -32,8 +32,20 @@ endif()
 
 # ── Kirigami (runtime-only, discovered via QML2_IMPORT_PATH) ──────────────
 
+find_package(Threads REQUIRED)
+
 # ── FTXUI ──────────────────────────────────────────────────────────────────
-find_package(ftxui REQUIRED)
+# find_package(ftxui REQUIRED)
+# find_library(FTXUI_COMPONENT_LIB NAMES ftxui-component REQUIRED)
+# find_library(FTXUI_DOM_LIB       NAMES ftxui-dom       REQUIRED)
+# find_library(FTXUI_SCREEN_LIB    NAMES ftxui-screen    REQUIRED)
+include(FetchContent)
+FetchContent_Declare(
+  ftxui
+  GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+  GIT_TAG main # This gets the latest, or use a specific tag like v5.0.0
+)
+FetchContent_MakeAvailable(ftxui)
 
 # ── SQLite3 ────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
@@ -61,6 +73,8 @@ find_package(CURL REQUIRED)
 
 # ── nlohmann_json (for JSON parsing) ───────────────────────────────────────
 find_package(nlohmann_json REQUIRED)
+
+
 
 # ── Source files ───────────────────────────────────────────────────────────
 set(ENDPAPER_SOURCES
@@ -92,9 +106,16 @@ target_link_libraries(endpaper PRIVATE
     KPim6::Mime
     KPim6::AkonadiCore
     KPim6::AkonadiMime
-    ftxui::screen
-    ftxui::dom
-    ftxui::component
+    # ftxui::component
+    # ftxui::dom
+    # ftxui::screen
+    # ${FTXUI_COMPONENT_LIB}
+    # ${FTXUI_DOM_LIB}
+    # ${FTXUI_SCREEN_LIB}
+    component
+    dom
+    screen
+    Threads::Threads
     pugixml::pugixml
     ${SQLITE3_LIBRARIES}
     ${LIBZIP_LIBRARIES}
