@@ -362,15 +362,24 @@ void Database::delete_rss_feed(int64_t feed_id) {
 // ── Cache operations ────────────────────────────────────────────────
 
 void Database::save_folder_cache(const std::vector<FolderInfo>& folders) {
-    exec("DELETE FROM folder_cache;");
-    const char* sql = "INSERT INTO folder_cache (collection_id, name, full_path) VALUES (?, ?, ?);";
-    for (const auto& f : folders) {
+    exec("BEGIN TRANSACTION;");
+    try {
+        exec("DELETE FROM folder_cache;");
+        const char* sql = "INSERT INTO folder_cache (collection_id, name, full_path) VALUES (?, ?, ?);";
         StmtGuard sg;
         check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
-        sqlite3_bind_int64(sg.stmt, 1, f.collection_id);
-        sqlite3_bind_text(sg.stmt, 2, f.name.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(sg.stmt, 3, f.full_path.c_str(), -1, SQLITE_TRANSIENT);
-        check(sqlite3_step(sg.stmt), db_, "step");
+        
+        for (const auto& f : folders) {
+            sqlite3_bind_int64(sg.stmt, 1, f.collection_id);
+            sqlite3_bind_text(sg.stmt, 2, f.name.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(sg.stmt, 3, f.full_path.c_str(), -1, SQLITE_TRANSIENT);
+            check(sqlite3_step(sg.stmt), db_, "step");
+            sqlite3_reset(sg.stmt);
+        }
+        exec("COMMIT;");
+    } catch (...) {
+        exec("ROLLBACK;");
+        throw;
     }
 }
 
@@ -391,16 +400,25 @@ std::vector<FolderInfo> Database::load_folder_cache() {
 }
 
 void Database::save_category_cache(const std::vector<MinifluxCategory>& categories) {
-    exec("DELETE FROM category_cache;");
-    const char* sql = "INSERT INTO category_cache (id, title, unread_count) VALUES (?, ?, ?);";
-    for (const auto& c : categories) {
-        if (c.id == -1) continue; // Skip "All Categories" as it is added at runtime
+    exec("BEGIN TRANSACTION;");
+    try {
+        exec("DELETE FROM category_cache;");
+        const char* sql = "INSERT INTO category_cache (id, title, unread_count) VALUES (?, ?, ?);";
         StmtGuard sg;
         check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
-        sqlite3_bind_int64(sg.stmt, 1, c.id);
-        sqlite3_bind_text(sg.stmt, 2, c.title.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(sg.stmt, 3, c.unread_count);
-        check(sqlite3_step(sg.stmt), db_, "step");
+        
+        for (const auto& c : categories) {
+            if (c.id == -1) continue; // Skip "All Categories" as it is added at runtime
+            sqlite3_bind_int64(sg.stmt, 1, c.id);
+            sqlite3_bind_text(sg.stmt, 2, c.title.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(sg.stmt, 3, c.unread_count);
+            check(sqlite3_step(sg.stmt), db_, "step");
+            sqlite3_reset(sg.stmt);
+        }
+        exec("COMMIT;");
+    } catch (...) {
+        exec("ROLLBACK;");
+        throw;
     }
 }
 

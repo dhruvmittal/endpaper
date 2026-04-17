@@ -1,26 +1,37 @@
 #include "rss_fetcher.h"
 
-#include <QCoreApplication>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
-#include <QUrl>
-#include <QEventLoop>
-#include <QTimer>
-
+#include <curl/curl.h>
 #include <pugixml.hpp>
 #include <iostream>
 #include <algorithm>
+#include <thread>
 
 namespace endpaper {
 
-class RssFetcherPrivate : public QObject {
-    Q_OBJECT
-public:
-    QNetworkAccessManager* manager;
+namespace {
 
+size_t curl_write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t realsize = size * nmemb;
+    std::string* mem = static_cast<std::string*>(userp);
+    mem->append(static_cast<char*>(contents), realsize);
+    return realsize;
+}
+
+struct CurlGlobalInit {
+    CurlGlobalInit() { curl_global_init(CURL_GLOBAL_DEFAULT); }
+    ~CurlGlobalInit() { curl_global_cleanup(); }
+};
+
+void init_curl_if_needed() {
+    static CurlGlobalInit init;
+}
+
+} // namespace
+
+class RssFetcherPrivate {
+public:
     RssFetcherPrivate() {
-        manager = new QNetworkAccessManager(this);
+        init_curl_if_needed();
     }
 };
 
@@ -28,64 +39,29 @@ RssFetcher::RssFetcher() : d(std::make_unique<RssFetcherPrivate>()) {}
 RssFetcher::~RssFetcher() = default;
 
 std::future<std::vector<RssItem>> RssFetcher::fetch_items(const std::string& url, size_t max_items) {
-    auto promise = std::make_shared<std::promise<std::vector<RssItem>>>();
-    auto future = promise->get_future();
+    return std::async(std::launch::async, [url, max_items]() -> std::vector<RssItem> {
+        CURL* curl = curl_easy_init();
+        if (!curl) return {};
 
-    std::thread([promise, url, max_items]() {
-        try {
-            int argc = 0;
-            char** argv = nullptr;
-            QCoreApplication* app = QCoreApplication::instance();
-            bool created_app = false;
-            if (!app) {
-                app = new QCoreApplication(argc, argv);
-                created_app = true;
-            }
+        std::string buffer;
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Endpaper/0.1 (RSS Fetcher; libcurl)");
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
 
-            QNetworkAccessManager manager;
-            QNetworkRequest request(QUrl(QString::fromStdString(url)));
-            
-            // In Qt6, we use RedirectPolicyAttribute instead of FollowRedirectsAttribute
-            request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-            request.setHeader(QNetworkRequest::UserAgentHeader, "Endpaper/0.1");
+        CURLcode res = curl_easy_perform(curl);
+        long response_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+        curl_easy_cleanup(curl);
 
-            QNetworkReply* reply = manager.get(request);
-            QEventLoop loop;
-            QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-            
-            QTimer timer;
-            timer.setSingleShot(true);
-            QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-            timer.start(30000);
-
-            loop.exec();
-
-            if (reply->error() == QNetworkReply::NoError && timer.isActive()) {
-                QByteArray data = reply->readAll();
-                auto items = RssFetcher::parse_xml(data.toStdString(), max_items);
-                promise->set_value(std::move(items));
-            } else {
-                if (!timer.isActive()) {
-                    promise->set_exception(std::make_exception_ptr(std::runtime_error("RSS fetch timeout")));
-                } else {
-                    promise->set_exception(std::make_exception_ptr(std::runtime_error(reply->errorString().toStdString())));
-                }
-            }
-
-            reply->deleteLater();
-            if (created_app) delete app;
-        } catch (const std::exception& e) {
-            try {
-                promise->set_exception(std::make_exception_ptr(e));
-            } catch (...) {}
-        } catch (...) {
-            try {
-                promise->set_exception(std::make_exception_ptr(std::runtime_error("Unknown error in RSS fetch thread")));
-            } catch (...) {}
+        if (res == CURLE_OK && response_code == 200) {
+            return RssFetcher::parse_xml(buffer, max_items);
         }
-    }).detach();
-
-    return future;
+        
+        return {};
+    });
 }
 
 std::vector<RssItem> RssFetcher::parse_xml(const std::string& xml_data, size_t max_items) {
@@ -142,5 +118,3 @@ std::vector<RssItem> RssFetcher::parse_xml(const std::string& xml_data, size_t m
 }
 
 } // namespace endpaper
-
-#include "rss_fetcher.moc"

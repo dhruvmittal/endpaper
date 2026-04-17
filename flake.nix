@@ -67,6 +67,9 @@
               pkgs.sqlite
               pkgs.libzip
               pkgs.pugixml
+              pkgs.lexbor
+              pkgs.curl
+              pkgs.nlohmann_json
             ] ++ (with pkgs.lib; optionals withGui [
               kde.qtdeclarative
               kde.qtsvg
@@ -119,7 +122,7 @@
           endpaper = mkEndpaper { inherit pkgs; withGui = false; withTui = true; };
           endpaper-qt = mkEndpaper { inherit pkgs; withGui = true; withTui = false; };
           all = mkEndpaper { inherit pkgs; withGui = true; withTui = true; };
-          default = all;
+          default = endpaper;
 
           flatpak-endpaper = mkFlatpak {
             appId = "page.codeberg.gnuslashdhruv.endpaper";

@@ -9,10 +9,31 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <pugixml.hpp>
 
 #include <zip.h>
 
 namespace endpaper {
+
+namespace {
+
+std::string xml_escape(const std::string& data) {
+    std::string buffer;
+    buffer.reserve(data.size());
+    for (size_t pos = 0; pos != data.size(); ++pos) {
+        switch (data[pos]) {
+            case '&':  buffer.append("&amp;");       break;
+            case '\"': buffer.append("&quot;");      break;
+            case '\'': buffer.append("&apos;");      break;
+            case '<':  buffer.append("&lt;");        break;
+            case '>':  buffer.append("&gt;");        break;
+            default:   buffer.append(1, data[pos]); break;
+        }
+    }
+    return buffer;
+}
+
+} // namespace
 
 namespace fs = std::filesystem;
 
@@ -48,7 +69,6 @@ std::string EpubBuilder::make_container_xml() {
 std::string EpubBuilder::make_content_opf(const EpubMetadata& meta,
                                           int chapter_count,
                                           const std::vector<std::string>& image_paths) {
-    // Current timestamp for dcterms:modified
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
     std::ostringstream ts;
@@ -61,10 +81,10 @@ std::string EpubBuilder::make_content_opf(const EpubMetadata& meta,
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="BookId">urn:uuid:)" << uuid << R"(</dc:identifier>
-    <dc:title>)" << meta.title << R"(</dc:title>
-    <dc:language>)" << meta.language << R"(</dc:language>
-    <dc:creator>)" << meta.author << R"(</dc:creator>
-    <dc:publisher>)" << meta.publisher << R"(</dc:publisher>
+    <dc:title>)" << xml_escape(meta.title.empty() ? "Untitled" : meta.title) << R"(</dc:title>
+    <dc:language>)" << xml_escape(meta.language.empty() ? "en" : meta.language) << R"(</dc:language>
+    <dc:creator>)" << xml_escape(meta.author) << R"(</dc:creator>
+    <dc:publisher>)" << xml_escape(meta.publisher) << R"(</dc:publisher>
     <meta property="dcterms:modified">)" << ts.str() << R"(</meta>
   </metadata>
   <manifest>
@@ -109,7 +129,7 @@ std::string EpubBuilder::make_toc_xhtml(
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
 <head>
-  <title>)" << title << R"( — Table of Contents</title>
+  <title>)" << xml_escape(title.empty() ? "Table of Contents" : title + " — Table of Contents") << R"(</title>
   <link rel="stylesheet" type="text/css" href="style.css"/>
 </head>
 <body>
@@ -121,7 +141,7 @@ std::string EpubBuilder::make_toc_xhtml(
     for (size_t i = 0; i < chapters.size(); ++i) {
         int idx = start_index + static_cast<int>(i);
         toc << "      <li><a href=\"chapter_" << idx << ".xhtml\">"
-            << chapters[i].title << "</a></li>\n";
+            << xml_escape(chapters[i].title) << "</a></li>\n";
     }
 
     toc << R"(    </ol>
@@ -133,20 +153,19 @@ std::string EpubBuilder::make_toc_xhtml(
     return toc.str();
 }
 
-std::string EpubBuilder::make_chapter_xhtml(const EpubChapter& chapter,
-                                            [[maybe_unused]] int index) {
+std::string EpubBuilder::make_chapter_xhtml(const EpubChapter& chapter, int index) {
     std::ostringstream ch;
     ch << R"(<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-  <title>)" << chapter.title << R"(</title>
+  <title>)" << xml_escape(chapter.title) << R"(</title>
   <link rel="stylesheet" type="text/css" href="style.css"/>
 </head>
 <body>
   <header class="email-header">
-    <h1>)" << chapter.title << R"(</h1>
-    <p class="meta">From: )" << chapter.author << R"(</p>
+    <h1>)" << xml_escape(chapter.title) << R"(</h1>
+    <p class="meta">From: )" << xml_escape(chapter.author) << R"(</p>
   </header>
   <article class="email-body">
 )" << chapter.body_html << R"(
@@ -223,6 +242,13 @@ td, th {
   padding: 0.4em 0.6em;
   text-align: left;
 }
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1em auto;
+}
 )";
 }
 
@@ -231,10 +257,7 @@ td, th {
 static void zip_add_string(zip_t* archive, const char* entry_name,
                             const std::string& content,
                             bool store = false) {
-    // We must copy the data because zip_source_buffer with freep=0
-    // does NOT copy — but libzip defers the actual write to zip_close,
-    // by which time the caller's string may be out of scope.
-    void* buf = malloc(content.size());
+    char* buf = static_cast<char*>(malloc(content.size()));
     if (!buf) {
         throw std::runtime_error("malloc failed for zip entry");
     }
@@ -256,73 +279,12 @@ static void zip_add_string(zip_t* archive, const char* entry_name,
     }
 
     if (store) {
-        // mimetype must be stored uncompressed
         zip_set_file_compression(archive, static_cast<zip_uint64_t>(idx),
                                   ZIP_CM_STORE, 0);
     }
 }
 
 // ── Build new EPUB ────────────────────────────────────────────────────────
-
-void EpubBuilder::create_epub_zip(const fs::path& zip_path,
-                                  const EpubMetadata& meta,
-                                  const std::vector<EpubChapter>& chapters,
-                                  const std::map<std::string, std::string>& images) {
-    int err = 0;
-    zip_t* archive = zip_open(zip_path.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &err);
-    if (!archive) {
-        throw std::runtime_error("Cannot create EPUB zip: " +
-                                  zip_path.string());
-    }
-
-    try {
-        // 1. mimetype (must be first entry, uncompressed)
-        std::string mimetype = "application/epub+zip";
-        zip_add_string(archive, "mimetype", mimetype, true);
-
-        // 2. META-INF/container.xml
-        zip_add_string(archive, "META-INF/container.xml",
-                       make_container_xml());
-
-        // 3. OEBPS/content.opf
-        std::vector<std::string> image_paths;
-        for (const auto& kv : images) image_paths.push_back(kv.first);
-        zip_add_string(archive, "OEBPS/content.opf",
-                       make_content_opf(meta,
-                                        static_cast<int>(chapters.size()),
-                                        image_paths));
-
-        // 4. OEBPS/toc.xhtml
-        zip_add_string(archive, "OEBPS/toc.xhtml",
-                       make_toc_xhtml(meta.title, chapters));
-
-        // 5. OEBPS/style.css
-        zip_add_string(archive, "OEBPS/style.css", make_stylesheet());
-
-        // 6. Chapter files
-        for (size_t i = 0; i < chapters.size(); ++i) {
-            std::string filename = "OEBPS/chapter_" + std::to_string(i) +
-                                   ".xhtml";
-            zip_add_string(archive, filename.c_str(),
-                          make_chapter_xhtml(chapters[i],
-                                             static_cast<int>(i)));
-        }
-
-        // 7. Image files
-        for (const auto& kv : images) {
-            std::string filename = "OEBPS/" + kv.first;
-            zip_add_string(archive, filename.c_str(), kv.second, false);
-        }
-
-        if (zip_close(archive) != 0) {
-            throw std::runtime_error(
-                std::string("zip_close failed: ") + zip_strerror(archive));
-        }
-    } catch (...) {
-        zip_discard(archive);
-        throw;
-    }
-}
 
 void EpubBuilder::build(const fs::path& output_path,
                         const EpubMetadata& meta,
@@ -332,11 +294,47 @@ void EpubBuilder::build(const fs::path& output_path,
         throw std::runtime_error("Cannot build EPUB with no chapters");
     }
 
-    // Atomic write: build to .tmp, then rename
     fs::path tmp_path = output_path;
     tmp_path += ".tmp";
 
-    create_epub_zip(tmp_path, meta, chapters, images);
+    int err = 0;
+    zip_t* archive = zip_open(tmp_path.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &err);
+    if (!archive) {
+        throw std::runtime_error("Cannot create EPUB zip: " + tmp_path.string());
+    }
+
+    try {
+        zip_add_string(archive, "mimetype", "application/epub+zip", true);
+        zip_add_string(archive, "META-INF/container.xml", make_container_xml());
+        
+        std::vector<std::string> image_paths;
+        for (const auto& kv : images) {
+            image_paths.push_back(kv.first);
+        }
+
+        zip_add_string(archive, "OEBPS/content.opf",
+                       make_content_opf(meta, static_cast<int>(chapters.size()), image_paths));
+        zip_add_string(archive, "OEBPS/toc.xhtml", make_toc_xhtml(meta.title, chapters));
+        zip_add_string(archive, "OEBPS/style.css", make_stylesheet());
+
+        for (size_t i = 0; i < chapters.size(); ++i) {
+            std::string filename = "OEBPS/chapter_" + std::to_string(i) + ".xhtml";
+            zip_add_string(archive, filename.c_str(), make_chapter_xhtml(chapters[i], static_cast<int>(i)));
+        }
+
+        for (const auto& kv : images) {
+            std::string safe_name = "OEBPS/" + kv.first;
+            zip_add_string(archive, safe_name.c_str(), kv.second, false);
+        }
+
+        if (zip_close(archive) != 0) {
+            throw std::runtime_error(std::string("zip_close failed: ") + zip_strerror(archive));
+        }
+    } catch (...) {
+        zip_discard(archive);
+        throw;
+    }
+
     fs::rename(tmp_path, output_path);
 }
 
@@ -346,199 +344,102 @@ void EpubBuilder::append(const fs::path& epub_path,
                          const std::vector<EpubChapter>& new_chapters,
                          const std::map<std::string, std::string>& images) {
     if (new_chapters.empty()) return;
-    if (!fs::exists(epub_path)) {
-        throw std::runtime_error("EPUB does not exist: " +
-                                  epub_path.string());
-    }
 
-    // 1. Open existing EPUB and read its contents
+    // Use libzip to open in update mode
     int err = 0;
     zip_t* archive = zip_open(epub_path.c_str(), 0, &err);
     if (!archive) {
-        throw std::runtime_error("Cannot open EPUB: " + epub_path.string());
-    }
-
-    // Helper: read a file from the zip into a string
-    auto read_zip_entry = [&](const char* name) -> std::string {
-        zip_stat_t stat;
-        if (zip_stat(archive, name, 0, &stat) != 0) {
-            return "";
-        }
-        zip_file_t* f = zip_fopen(archive, name, 0);
-        if (!f) return "";
-        std::string buf(stat.size, '\0');
-        zip_fread(f, buf.data(), stat.size);
-        zip_fclose(f);
-        return buf;
-    };
-
-    // 2. Parse content.opf to find existing chapter count
-    std::string opf_content = read_zip_entry("OEBPS/content.opf");
-    if (opf_content.empty()) {
-        zip_close(archive);
-        throw std::runtime_error("Cannot read content.opf from EPUB");
-    }
-
-    // Count existing chapters by looking for chapter_N patterns in manifest
-    int existing_count = 0;
-    {
-        std::regex chapter_re(R"RE(id="chapter_(\d+)")RE");
-        auto begin = std::sregex_iterator(opf_content.begin(),
-                                           opf_content.end(), chapter_re);
-        for (auto it = begin; it != std::sregex_iterator(); ++it) {
-            int n = std::stoi((*it)[1].str());
-            existing_count = std::max(existing_count, n + 1);
-        }
-    }
-
-    // 3. Read existing TOC to merge
-    std::string toc_content = read_zip_entry("OEBPS/toc.xhtml");
-
-    // 4. Collect all existing zip entries
-    struct ZipEntry {
-        std::string name;
-        std::string data;
-        bool is_mimetype;
-    };
-    std::vector<ZipEntry> entries;
-
-    zip_int64_t num = zip_get_num_entries(archive, 0);
-    for (zip_int64_t i = 0; i < num; ++i) {
-        const char* name = zip_get_name(archive, static_cast<zip_uint64_t>(i), 0);
-        if (!name) continue;
-
-        std::string sname(name);
-        // We'll regenerate content.opf and toc.xhtml
-        if (sname == "OEBPS/content.opf" || sname == "OEBPS/toc.xhtml") {
-            continue;
-        }
-
-        zip_stat_t stat;
-        zip_stat_index(archive, static_cast<zip_uint64_t>(i), 0, &stat);
-        zip_file_t* f = zip_fopen_index(archive, static_cast<zip_uint64_t>(i), 0);
-        std::string data;
-        if (f && stat.size > 0) {
-            data.resize(stat.size);
-            zip_fread(f, data.data(), stat.size);
-            zip_fclose(f);
-        }
-
-        entries.push_back({sname, data, sname == "mimetype"});
-    }
-
-    zip_close(archive);
-
-    // 5. Build updated content.opf
-    int total_chapters = existing_count + static_cast<int>(new_chapters.size());
-
-    // Extract metadata from existing OPF (simple regex extraction)
-    auto extract_tag = [&](const std::string& tag) -> std::string {
-        std::regex re("<dc:" + tag + ">(.*?)</dc:" + tag + ">",
-                      std::regex::icase);
-        std::smatch m;
-        if (std::regex_search(opf_content, m, re)) return m[1].str();
-        return "";
-    };
-
-    EpubMetadata meta;
-    meta.title = extract_tag("title");
-    meta.author = extract_tag("creator");
-    meta.publisher = extract_tag("publisher");
-    meta.language = extract_tag("language");
-
-    // Extract UUID
-    {
-        std::regex uuid_re(R"RE(urn:uuid:([a-f0-9\-]+))RE", std::regex::icase);
-        std::smatch m;
-        if (std::regex_search(opf_content, m, uuid_re)) {
-            meta.uuid = m[1].str();
-        }
-    }
-
-    std::vector<std::string> all_image_paths;
-    {
-        std::regex img_re(R"RE(<item id="[^"]+" href="([^"]+)" media-type="image/jpeg"\s*/>)RE", std::regex::icase);
-        auto begin = std::sregex_iterator(opf_content.begin(), opf_content.end(), img_re);
-        for (auto it = begin; it != std::sregex_iterator(); ++it) {
-            all_image_paths.push_back((*it)[1].str());
-        }
-    }
-    for (const auto& kv : images) {
-        all_image_paths.push_back(kv.first);
-    }
-    std::string new_opf = make_content_opf(meta, total_chapters, all_image_paths);
-
-    // 6. Build updated TOC — collect all chapter titles
-    std::vector<EpubChapter> all_toc_chapters;
-    // Existing chapters: extract titles from the old TOC
-    {
-        std::regex toc_entry_re(
-            R"RE(<a href="chapter_\d+\.xhtml">(.*?)</a>)RE",
-            std::regex::icase);
-        auto begin = std::sregex_iterator(toc_content.begin(),
-                                           toc_content.end(), toc_entry_re);
-        for (auto it = begin; it != std::sregex_iterator(); ++it) {
-            EpubChapter dummy;
-            dummy.title = (*it)[1].str();
-            all_toc_chapters.push_back(dummy);
-        }
-    }
-    // Add new chapter titles
-    for (const auto& ch : new_chapters) {
-        all_toc_chapters.push_back(ch);
-    }
-    std::string new_toc = make_toc_xhtml(meta.title, all_toc_chapters);
-
-    // 7. Create new EPUB with everything combined
-    fs::path tmp_path = epub_path;
-    tmp_path += ".tmp";
-
-    int zerr = 0;
-    zip_t* new_archive = zip_open(tmp_path.c_str(),
-                                   ZIP_CREATE | ZIP_TRUNCATE, &zerr);
-    if (!new_archive) {
-        throw std::runtime_error("Cannot create temp EPUB: " +
-                                  tmp_path.string());
+        throw std::runtime_error("Cannot open EPUB for append: " + epub_path.string());
     }
 
     try {
-        // Re-add all existing entries
-        for (const auto& entry : entries) {
-            zip_add_string(new_archive, entry.name.c_str(), entry.data,
-                          entry.is_mimetype);
+        auto read_entry = [&](const char* name) -> std::string {
+            zip_stat_t st;
+            if (zip_stat(archive, name, 0, &st) != 0) return "";
+            zip_file_t* f = zip_fopen(archive, name, 0);
+            if (!f) return "";
+            std::string buf(st.size, '\0');
+            zip_fread(f, buf.data(), st.size);
+            zip_fclose(f);
+            return buf;
+        };
+
+        std::string opf_str = read_entry("OEBPS/content.opf");
+        if (opf_str.empty()) throw std::runtime_error("Missing content.opf");
+
+        pugi::xml_document opf_doc;
+        if (!opf_doc.load_string(opf_str.c_str())) throw std::runtime_error("Malformed content.opf");
+
+        // Use XPath to find metadata
+        pugi::xml_node pkg = opf_doc.child("package");
+        pugi::xml_node meta_node = pkg.child("metadata");
+        EpubMetadata meta;
+        meta.title = meta_node.child("dc:title").text().get();
+        meta.author = meta_node.child("dc:creator").text().get();
+        meta.publisher = meta_node.child("dc:publisher").text().get();
+        meta.language = meta_node.child("dc:language").text().get();
+        
+        std::string id_str = meta_node.child("dc:identifier").text().get();
+        if (id_str.find("urn:uuid:") == 0) meta.uuid = id_str.substr(9);
+
+        // Count existing chapters and images
+        pugi::xml_node manifest = pkg.child("manifest");
+        int existing_chapters = 0;
+        std::vector<std::string> all_image_paths;
+        
+        for (pugi::xml_node item : manifest.children("item")) {
+            std::string href = item.attribute("href").value();
+            if (href.find("chapter_") == 0) {
+                existing_chapters++;
+            } else if (item.attribute("media-type").as_string() == std::string("image/jpeg")) {
+                all_image_paths.push_back(href);
+            }
         }
 
-        // Add updated content.opf and toc
-        zip_add_string(new_archive, "OEBPS/content.opf", new_opf);
-        zip_add_string(new_archive, "OEBPS/toc.xhtml", new_toc);
-
-        // Add new chapter files
-        for (size_t i = 0; i < new_chapters.size(); ++i) {
-            int idx = existing_count + static_cast<int>(i);
-            std::string filename = "OEBPS/chapter_" + std::to_string(idx) +
-                                   ".xhtml";
-            zip_add_string(new_archive, filename.c_str(),
-                          make_chapter_xhtml(new_chapters[i], idx));
-        }
-
-        // Add new images files
+        // Add new images
         for (const auto& kv : images) {
-            std::string filename = "OEBPS/" + kv.first;
-            zip_add_string(new_archive, filename.c_str(), kv.second, false);
+            std::string safe_name = kv.first;
+            if (std::find(all_image_paths.begin(), all_image_paths.end(), safe_name) == all_image_paths.end()) {
+                all_image_paths.push_back(safe_name);
+                zip_add_string(archive, ("OEBPS/" + safe_name).c_str(), kv.second, false);
+            }
         }
 
-        if (zip_close(new_archive) != 0) {
-            throw std::runtime_error(
-                std::string("zip_close failed: ") +
-                zip_strerror(new_archive));
+        // Add new chapters
+        for (size_t i = 0; i < new_chapters.size(); ++i) {
+            int idx = existing_chapters + static_cast<int>(i);
+            std::string filename = "OEBPS/chapter_" + std::to_string(idx) + ".xhtml";
+            zip_add_string(archive, filename.c_str(), make_chapter_xhtml(new_chapters[i], idx));
+        }
+
+        // Update content.opf and toc.xhtml
+        int total_chapters = existing_chapters + static_cast<int>(new_chapters.size());
+        zip_add_string(archive, "OEBPS/content.opf", make_content_opf(meta, total_chapters, all_image_paths));
+
+        // Read old TOC to get titles
+        std::string toc_str = read_entry("OEBPS/toc.xhtml");
+        std::vector<EpubChapter> all_toc_chapters;
+        if (!toc_str.empty()) {
+            pugi::xml_document toc_doc;
+            toc_doc.load_string(toc_str.c_str());
+            // Extract existing titles from <nav epub:type="toc"><ol><li><a ...>Title</a>
+            for (pugi::xpath_node xnode : toc_doc.select_nodes("//*[@epub:type='toc']//ol/li/a")) {
+                pugi::xml_node a = xnode.node();
+                EpubChapter ch;
+                ch.title = a.text().get();
+                all_toc_chapters.push_back(std::move(ch));
+            }
+        }
+        for (const auto& ch : new_chapters) all_toc_chapters.push_back(ch);
+        zip_add_string(archive, "OEBPS/toc.xhtml", make_toc_xhtml(meta.title, all_toc_chapters));
+
+        if (zip_close(archive) != 0) {
+            throw std::runtime_error(std::string("zip_close failed: ") + zip_strerror(archive));
         }
     } catch (...) {
-        zip_discard(new_archive);
+        zip_discard(archive);
         throw;
     }
-
-    // Atomic rename
-    fs::rename(tmp_path, epub_path);
 }
 
 } // namespace endpaper

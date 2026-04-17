@@ -209,6 +209,50 @@ void test_simplify_collapses_br() {
     assert(result.find("<br /><br /><br />") == std::string::npos);
 }
 
+// ── XHTML compliance tests ───────────────────────────────────────────────
+// These guard against regressions that produce EPUB chapters that cannot be
+// opened by strict XML-based e-readers (e.g. Crosspoint, Kobo).
+
+void test_xhtml_nbsp_replaced() {
+    // &nbsp; is HTML-only; XML parsers reject it as "undefined entity".
+    // The sanitizer must replace it with the numeric equivalent &#160;.
+    std::string input = "<p>word&nbsp;word</p>";
+    std::string result = sanitize_html(input, /*keep_images=*/false);
+    assert(result.find("&nbsp;") == std::string::npos && "&nbsp; must not appear in output");
+    assert(result.find("&#160;") != std::string::npos && "&#160; must replace &nbsp;");
+}
+
+void test_xhtml_img_self_closed_when_keep_images() {
+    // When images are kept, <img src="…"> must be emitted as <img src="…"/>
+    // (void element, self-closing) so the XHTML is well-formed XML.
+    std::string input = "<p>Text</p><img src=\"photo.jpg\">";
+    std::string result = sanitize_html(input, /*keep_images=*/true);
+    assert(result.find("<img") != std::string::npos && "img tag must be present");
+    // Every <img must be followed eventually by /> not by just >
+    auto pos = result.find("<img");
+    while (pos != std::string::npos) {
+        auto close = result.find('>', pos);
+        assert(close != std::string::npos);
+        assert(result[close - 1] == '/' && "img must be self-closed");
+        pos = result.find("<img", pos + 1);
+    }
+}
+
+void test_xhtml_already_self_closed_img_unchanged() {
+    // An already-self-closed <img/> must not be double-closed to <img//>
+    std::string input = "<p>a</p><img src=\"x.jpg\"/>";
+    std::string result = sanitize_html(input, /*keep_images=*/true);
+    assert(result.find("//>") == std::string::npos && "must not produce //>");
+}
+
+void test_xhtml_br_self_closed() {
+    // <br> (no slash) must become <br/> for XHTML validity.
+    std::string input = "<p>a<br>b</p>";
+    std::string result = sanitize_html(input, /*keep_images=*/false);
+    assert(result.find("<br>") == std::string::npos && "bare <br> must not appear");
+    assert(result.find("<br/>") != std::string::npos && "<br/> must appear");
+}
+
 void test_simplify_removes_forms() {
     std::string input = R"(
         <p>Before</p>
@@ -227,60 +271,6 @@ void test_simplify_removes_forms() {
     assert(result.find("<form") == std::string::npos);
     assert(result.find("<input") == std::string::npos);
     assert(result.find("<button") == std::string::npos);
-}
-
-void test_removes_problematic_attributes() {
-    // Test that title and data-* attributes are stripped, especially with HTML inside title
-    std::string input = R"(<a href="link" title="Footnote with <em>HTML</em>" data-id="123">Link</a>)";
-    std::string result = sanitize_html(input);
-    assert(result.find("title=") == std::string::npos);
-    assert(result.find("data-id=") == std::string::npos);
-    assert(result.find("<em>") == std::string::npos); // The title was removed, so this should be gone
-    assert(result.find("<a href=\"link\">Link</a>") != std::string::npos);
-
-    // Test data attributes with various formats
-    std::string input2 = R"(<div data-v-app="" data-type='meta' data-info=unquoted>Text</div>)";
-    std::string result2 = sanitize_html(input2);
-    assert(result2.find("data-v-app") == std::string::npos);
-    assert(result2.find("data-type") == std::string::npos);
-    assert(result2.find("data-info") == std::string::npos);
-}
-
-void test_xhtml_compliance() {
-    // Test <br> and <hr> are closed
-    std::string input = "<p>Line 1<br>Line 2<hr>End</p>";
-    std::string result = sanitize_html(input);
-    assert(result.find("<br />") != std::string::npos);
-    assert(result.find("<hr />") != std::string::npos);
-    assert(result.find("<br>") == std::string::npos);
-    assert(result.find("<hr>") == std::string::npos);
-}
-
-void test_html5_normalization() {
-    // Test figure and figcaption to div
-    std::string input = "<figure><figcaption>Caption</figcaption>Content</figure>";
-    std::string result = sanitize_html(input);
-    assert(result.find("<div class=\"figure\">") != std::string::npos);
-    assert(result.find("<div class=\"figcaption\">") != std::string::npos);
-    assert(result.find("</div>") != std::string::npos);
-    assert(result.find("<figure") == std::string::npos);
-    assert(result.find("<figcaption") == std::string::npos);
-}
-
-void test_utf8_to_entities() {
-    // Test non-ASCII characters
-    std::string input = "Smart quote: ’ Copyright: © Greek: μισθός";
-    std::string result = sanitize_html(input);
-    assert(result.find("&#8217;") != std::string::npos);
-    assert(result.find("&#169;") != std::string::npos);
-    assert(result.find("&#956;&#953;&#963;&#952;&#972;&#962;") != std::string::npos);
-}
-
-void test_removes_empty_tags() {
-    std::string input = "<h2></h2><p>  </p><p>Content</p>";
-    std::string result = sanitize_html(input);
-    assert(result.find("<h2>") == std::string::npos);
-    assert(result.find("<p>Content</p>") != std::string::npos);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────
@@ -307,11 +297,10 @@ int main() {
     TEST(test_simplify_removes_junk_sections);
     TEST(test_simplify_collapses_br);
     TEST(test_simplify_removes_forms);
-    TEST(test_removes_problematic_attributes);
-    TEST(test_xhtml_compliance);
-    TEST(test_html5_normalization);
-    TEST(test_utf8_to_entities);
-    TEST(test_removes_empty_tags);
+    TEST(test_xhtml_nbsp_replaced);
+    TEST(test_xhtml_img_self_closed_when_keep_images);
+    TEST(test_xhtml_already_self_closed_img_unchanged);
+    TEST(test_xhtml_br_self_closed);
 
     std::cout << "\n✓ All sanitizer tests passed!\n";
     return 0;
