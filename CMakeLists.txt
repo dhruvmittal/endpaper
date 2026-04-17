@@ -35,17 +35,27 @@ endif()
 find_package(Threads REQUIRED)
 
 # ── FTXUI ──────────────────────────────────────────────────────────────────
-# find_package(ftxui REQUIRED)
-# find_library(FTXUI_COMPONENT_LIB NAMES ftxui-component REQUIRED)
-# find_library(FTXUI_DOM_LIB       NAMES ftxui-dom       REQUIRED)
-# find_library(FTXUI_SCREEN_LIB    NAMES ftxui-screen    REQUIRED)
-include(FetchContent)
-FetchContent_Declare(
-  ftxui
-  GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
-  GIT_TAG main # This gets the latest, or use a specific tag like v5.0.0
-)
-FetchContent_MakeAvailable(ftxui)
+find_package(ftxui QUIET)
+if(NOT ftxui_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(
+      ftxui
+      GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+      GIT_TAG main # This gets the latest, or use a specific tag like v5.0.0
+    )
+    FetchContent_MakeAvailable(ftxui)
+
+    # If FetchContent provided bare targets, create namespaced aliases for consistency
+    if(TARGET screen AND NOT TARGET ftxui::screen)
+        add_library(ftxui::screen ALIAS screen)
+    endif()
+    if(TARGET dom AND NOT TARGET ftxui::dom)
+        add_library(ftxui::dom ALIAS dom)
+    endif()
+    if(TARGET component AND NOT TARGET ftxui::component)
+        add_library(ftxui::component ALIAS component)
+    endif()
+endif()
 
 # ── SQLite3 ────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
@@ -106,15 +116,9 @@ target_link_libraries(endpaper PRIVATE
     KPim6::Mime
     KPim6::AkonadiCore
     KPim6::AkonadiMime
-    # ftxui::component
-    # ftxui::dom
-    # ftxui::screen
-    # ${FTXUI_COMPONENT_LIB}
-    # ${FTXUI_DOM_LIB}
-    # ${FTXUI_SCREEN_LIB}
-    component
-    dom
-    screen
+    ftxui::component
+    ftxui::dom
+    ftxui::screen
     Threads::Threads
     pugixml::pugixml
     ${SQLITE3_LIBRARIES}
