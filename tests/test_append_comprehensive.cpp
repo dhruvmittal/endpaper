@@ -224,6 +224,75 @@ void test_mimetype_first_and_stored() {
     zip_close(archive);
 }
 
+void test_append_image_collision_renamed() {
+    fs::path epub = TEST_DIR / "image_collision.epub";
+    EpubMetadata meta{.title = "Image Collision", .author = "Author"};
+    std::vector<EpubChapter> initial = {
+        {"Ch 1", "a@b.com", "<p>First <img src=\"images/img_1.jpg\"/></p>"}
+    };
+    std::map<std::string, std::string> img1 = {{"images/img_1.jpg", "img_data_one"}};
+    EpubBuilder::build(epub, meta, initial, img1);
+
+    std::vector<EpubChapter> appended = {
+        {"Ch 2", "b@c.com", "<p>Second <img src=\"images/img_1.jpg\"/></p>"}
+    };
+    std::map<std::string, std::string> img2 = {{"images/img_1.jpg", "img_data_two"}};
+    EpubBuilder::append(epub, appended, img2);
+
+    assert(zip_has_entry(epub, "OEBPS/images/img_1.jpg"));
+    assert(zip_has_entry(epub, "OEBPS/images/img_2.jpg"));
+    assert(read_zip_file(epub, "OEBPS/images/img_1.jpg") == "img_data_one");
+    assert(read_zip_file(epub, "OEBPS/images/img_2.jpg") == "img_data_two");
+
+    std::string ch0 = read_zip_file(epub, "OEBPS/chapter_0.xhtml");
+    std::string ch1 = read_zip_file(epub, "OEBPS/chapter_1.xhtml");
+    assert(ch0.find("images/img_1.jpg") != std::string::npos);
+    assert(ch1.find("images/img_2.jpg") != std::string::npos);
+
+    std::string opf = read_zip_file(epub, "OEBPS/content.opf");
+    assert(opf.find("href=\"images/img_1.jpg\"") != std::string::npos);
+    assert(opf.find("href=\"images/img_2.jpg\"") != std::string::npos);
+}
+
+void test_append_cascading_image_collision() {
+    fs::path epub = TEST_DIR / "cascading_image_collision.epub";
+    EpubMetadata meta{.title = "Cascading Collision", .author = "Author"};
+    std::vector<EpubChapter> initial = {
+        {"Ch 1", "a@b.com", "<p>Orig <img src=\"images/img_1.jpg\"/></p>"}
+    };
+    EpubBuilder::build(epub, meta, initial, {{"images/img_1.jpg", "orig_one"}});
+
+    std::vector<EpubChapter> appended = {
+        {"Ch 2", "b@c.com",
+         "<p>A <img src=\"images/img_1.jpg\"/></p>"
+         "<p>B <img src=\"images/img_2.jpg\"/></p>"}
+    };
+    std::map<std::string, std::string> extra = {
+        {"images/img_1.jpg", "new_one"},
+        {"images/img_2.jpg", "new_two"}
+    };
+    EpubBuilder::append(epub, appended, extra);
+
+    assert(read_zip_file(epub, "OEBPS/images/img_1.jpg") == "orig_one");
+    assert(zip_has_entry(epub, "OEBPS/images/img_2.jpg"));
+    assert(zip_has_entry(epub, "OEBPS/images/img_3.jpg"));
+
+    std::string img2 = read_zip_file(epub, "OEBPS/images/img_2.jpg");
+    std::string img3 = read_zip_file(epub, "OEBPS/images/img_3.jpg");
+    assert((img2 == "new_two" && img3 == "new_one") ||
+           (img2 == "new_one" && img3 == "new_two"));
+
+    std::string ch1 = read_zip_file(epub, "OEBPS/chapter_1.xhtml");
+    assert(ch1.find("images/img_1.jpg") == std::string::npos);
+    assert(ch1.find("images/img_2.jpg") != std::string::npos);
+    assert(ch1.find("images/img_3.jpg") != std::string::npos);
+
+    std::string opf = read_zip_file(epub, "OEBPS/content.opf");
+    assert(opf.find("href=\"images/img_1.jpg\"") != std::string::npos);
+    assert(opf.find("href=\"images/img_2.jpg\"") != std::string::npos);
+    assert(opf.find("href=\"images/img_3.jpg\"") != std::string::npos);
+}
+
 int main() {
     std::cout << "╔════════════════════════════════════════════════════╗\n";
     std::cout << "║  Endpaper — Comprehensive Append Tests             ║\n";
@@ -236,6 +305,8 @@ int main() {
     TEST(test_append_to_missing_file_throws);
     TEST(test_append_empty_is_noop);
     TEST(test_mimetype_first_and_stored);
+    TEST(test_append_image_collision_renamed);
+    TEST(test_append_cascading_image_collision);
 
     teardown();
 

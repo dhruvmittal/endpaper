@@ -1,4 +1,5 @@
 #include "epub_builder.h"
+#include "html_sanitizer.h"
 
 #include <algorithm>
 #include <chrono>
@@ -6,9 +7,10 @@
 #include <fstream>
 #include <iomanip>
 #include <random>
-#include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <ctime>
+#include <unordered_set>
 #include <pugixml.hpp>
 
 #include <zip.h>
@@ -71,8 +73,10 @@ std::string EpubBuilder::make_content_opf(const EpubMetadata& meta,
                                           const std::vector<std::string>& image_paths) {
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_buf{};
+    gmtime_r(&time, &tm_buf);
     std::ostringstream ts;
-    ts << std::put_time(std::gmtime(&time), "%Y-%m-%dT%H:%M:%SZ");
+    ts << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%SZ");
 
     std::string uuid = meta.uuid.empty() ? generate_uuid() : meta.uuid;
 
@@ -154,6 +158,7 @@ std::string EpubBuilder::make_toc_xhtml(
 }
 
 std::string EpubBuilder::make_chapter_xhtml(const EpubChapter& chapter, int index) {
+    (void)index;
     std::ostringstream ch;
     ch << R"(<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -165,10 +170,13 @@ std::string EpubBuilder::make_chapter_xhtml(const EpubChapter& chapter, int inde
 <body>
   <header class="email-header">
     <h1>)" << xml_escape(chapter.title) << R"(</h1>
-    <p class="meta">From: )" << xml_escape(chapter.author) << R"(</p>
-  </header>
+)";
+    if (!chapter.author.empty()) {
+        ch << "    <p class=\"meta\">From: " << xml_escape(chapter.author) << "</p>\n";
+    }
+    ch << R"(  </header>
   <article class="email-body">
-)" << chapter.body_html << R"(
+)" << ensure_xhtml(chapter.body_html) << R"(
   </article>
 </body>
 </html>
@@ -178,68 +186,72 @@ std::string EpubBuilder::make_chapter_xhtml(const EpubChapter& chapter, int inde
 }
 
 std::string EpubBuilder::make_stylesheet() {
-    return R"(/* Endpaper EPUB Stylesheet */
+    return R"(/* Endpaper EPUB Stylesheet (optimized for e-ink) */
 body {
   font-family: Georgia, "Times New Roman", serif;
-  margin: 1em;
-  line-height: 1.6;
-  color: #222;
+  margin: 0.5em;
+  line-height: 1.5;
+  color: #000;
 }
 
 h1 {
-  font-size: 1.4em;
+  font-size: 1.35em;
   margin-bottom: 0.3em;
-  border-bottom: 1px solid #ccc;
+  border-bottom: 1px solid #000;
   padding-bottom: 0.2em;
 }
 
 .email-header {
-  margin-bottom: 1.5em;
+  margin-bottom: 1.2em;
 }
 
 .meta {
   font-size: 0.9em;
-  color: #666;
+  color: #444;
   font-style: italic;
+  margin-top: 0.2em;
 }
 
 .email-body {
-  margin-top: 1em;
+  margin-top: 0.8em;
 }
 
 blockquote {
-  border-left: 3px solid #ccc;
+  border-left: 3px solid #444;
   margin-left: 0;
-  padding-left: 1em;
-  color: #555;
+  padding-left: 0.8em;
+  color: #222;
 }
 
 a {
-  color: #2a6496;
-  text-decoration: none;
+  color: #000;
+  text-decoration: underline;
+  overflow-wrap: break-word;
 }
 
 pre, code {
   font-family: "Courier New", monospace;
-  font-size: 0.9em;
-  background: #f4f4f4;
-  padding: 0.2em 0.4em;
+  font-size: 0.85em;
+  background: #eee;
+  padding: 0.15em 0.35em;
+  overflow-wrap: break-word;
 }
 
 pre {
-  padding: 0.8em;
-  overflow-x: auto;
+  padding: 0.6em;
+  border: 1px solid #444;
+  white-space: pre-wrap;
 }
 
 table {
   border-collapse: collapse;
   width: 100%;
-  margin: 1em 0;
+  margin: 0.8em 0;
 }
 
 td, th {
-  border: 1px solid #ddd;
-  padding: 0.4em 0.6em;
+  border: 1px solid #444;
+  padding: 0.35em 0.5em;
   text-align: left;
 }
 
@@ -247,7 +259,7 @@ img {
   max-width: 100%;
   height: auto;
   display: block;
-  margin: 1em auto;
+  margin: 0.8em auto;
 }
 )";
 }
@@ -386,34 +398,91 @@ void EpubBuilder::append(const fs::path& epub_path,
         pugi::xml_node manifest = pkg.child("manifest");
         int existing_chapters = 0;
         std::vector<std::string> all_image_paths;
-        
+        std::unordered_set<std::string> existing_images;
+        int next_img_idx = 0;
+
         for (pugi::xml_node item : manifest.children("item")) {
             std::string href = item.attribute("href").value();
             if (href.find("chapter_") == 0) {
                 existing_chapters++;
             } else if (item.attribute("media-type").as_string() == std::string("image/jpeg")) {
                 all_image_paths.push_back(href);
+                existing_images.insert(href);
+                // Track highest images/img_<N>.jpg index to avoid filename collisions
+                const std::string prefix = "images/img_";
+                const std::string suffix = ".jpg";
+                if (href.rfind(prefix, 0) == 0 && href.size() > prefix.size() + suffix.size() &&
+                    href.compare(href.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    try {
+                        int n = std::stoi(href.substr(prefix.size(), href.size() - prefix.size() - suffix.size()));
+                        next_img_idx = std::max(next_img_idx, n);
+                    } catch (...) {}
+                }
             }
         }
 
-        // Add new images
+        // Reserve existing and incoming names before allocating new names so no
+        // rename can collide with a subsequent incoming image.
+        std::unordered_set<std::string> reserved = existing_images;
         for (const auto& kv : images) {
-            std::string safe_name = kv.first;
-            if (std::find(all_image_paths.begin(), all_image_paths.end(), safe_name) == all_image_paths.end()) {
-                all_image_paths.push_back(safe_name);
-                zip_add_string(archive, ("OEBPS/" + safe_name).c_str(), kv.second, false);
+            reserved.insert(kv.first);
+        }
+
+        std::vector<std::pair<std::string, std::string>> renames;
+        std::vector<std::pair<std::string, std::string>> entries_to_add;
+        for (const auto& kv : images) {
+            std::string target_path = kv.first;
+            if (existing_images.count(target_path)) {
+                do {
+                    target_path = "images/img_" + std::to_string(++next_img_idx) + ".jpg";
+                } while (reserved.count(target_path));
+                reserved.insert(target_path);
+                renames.emplace_back(kv.first, target_path);
             }
+            existing_images.insert(target_path);
+            all_image_paths.push_back(target_path);
+            entries_to_add.emplace_back(target_path, kv.second);
+        }
+
+        std::vector<EpubChapter> chapters_copy = new_chapters;
+        if (!renames.empty()) {
+            auto replace_all = [](std::string& str, const std::string& from, const std::string& to) {
+                size_t pos = 0;
+                while ((pos = str.find(from, pos)) != std::string::npos) {
+                    str.replace(pos, from.size(), to);
+                    pos += to.size();
+                }
+            };
+            // Two-phase replacement prevents cascading img_1->img_2->img_3 collisions
+            for (size_t idx = 0; idx < renames.size(); ++idx) {
+                std::string token = "__ENDPAPER_IMG_REMAP_" + std::to_string(idx) + "__";
+                for (auto& ch : chapters_copy) {
+                    replace_all(ch.body_html, "\"" + renames[idx].first + "\"", "\"" + token + "\"");
+                    replace_all(ch.body_html, "'" + renames[idx].first + "'", "'" + token + "'");
+                }
+            }
+            for (size_t idx = 0; idx < renames.size(); ++idx) {
+                std::string token = "__ENDPAPER_IMG_REMAP_" + std::to_string(idx) + "__";
+                for (auto& ch : chapters_copy) {
+                    replace_all(ch.body_html, "\"" + token + "\"", "\"" + renames[idx].second + "\"");
+                    replace_all(ch.body_html, "'" + token + "'", "'" + renames[idx].second + "'");
+                }
+            }
+        }
+
+        for (const auto& [target_path, bytes] : entries_to_add) {
+            zip_add_string(archive, ("OEBPS/" + target_path).c_str(), bytes, false);
         }
 
         // Add new chapters
-        for (size_t i = 0; i < new_chapters.size(); ++i) {
+        for (size_t i = 0; i < chapters_copy.size(); ++i) {
             int idx = existing_chapters + static_cast<int>(i);
             std::string filename = "OEBPS/chapter_" + std::to_string(idx) + ".xhtml";
-            zip_add_string(archive, filename.c_str(), make_chapter_xhtml(new_chapters[i], idx));
+            zip_add_string(archive, filename.c_str(), make_chapter_xhtml(chapters_copy[i], idx));
         }
 
         // Update content.opf and toc.xhtml
-        int total_chapters = existing_chapters + static_cast<int>(new_chapters.size());
+        int total_chapters = existing_chapters + static_cast<int>(chapters_copy.size());
         zip_add_string(archive, "OEBPS/content.opf", make_content_opf(meta, total_chapters, all_image_paths));
 
         // Read old TOC to get titles
@@ -430,7 +499,7 @@ void EpubBuilder::append(const fs::path& epub_path,
                 all_toc_chapters.push_back(std::move(ch));
             }
         }
-        for (const auto& ch : new_chapters) all_toc_chapters.push_back(ch);
+        for (const auto& ch : chapters_copy) all_toc_chapters.push_back(ch);
         zip_add_string(archive, "OEBPS/toc.xhtml", make_toc_xhtml(meta.title, all_toc_chapters));
 
         if (zip_close(archive) != 0) {

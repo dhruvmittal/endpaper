@@ -205,8 +205,17 @@ void test_simplify_removes_junk_sections() {
 void test_simplify_collapses_br() {
     std::string input = R"(<p>Line 1</p><br><br><br><br><p>Line 2</p>)";
     std::string result = simplify_html(input);
-    assert(result.find("<br /><br />") != std::string::npos);
-    assert(result.find("<br /><br /><br />") == std::string::npos);
+    assert(result.find("<br/><br/>") != std::string::npos);
+    assert(result.find("<br/><br/><br/>") == std::string::npos);
+}
+
+void test_simplify_separates_table_cells() {
+    std::string input = R"(<table><tr><td>Alpha</td><td>Beta</td></tr><tr><td>Gamma</td></tr></table>)";
+    std::string result = simplify_html(input);
+    assert(result.find("AlphaBeta") == std::string::npos);
+    assert(result.find("Alpha Beta") != std::string::npos);
+    assert(result.find("<br/>") != std::string::npos);
+    assert(result.find("Gamma") != std::string::npos);
 }
 
 // ── XHTML compliance tests ───────────────────────────────────────────────
@@ -273,6 +282,32 @@ void test_simplify_removes_forms() {
     assert(result.find("<button") == std::string::npos);
 }
 
+void test_frameset_null_body_safe() {
+    std::string fs_html = "<html><frameset><frame src='a.html'></frameset></html>";
+    std::string s1 = sanitize_html(fs_html);
+    std::string s2 = simplify_html(fs_html);
+    assert(s1.empty() || s1.find("<script") == std::string::npos);
+    assert(s2.empty() || s2.find("<script") == std::string::npos);
+}
+
+void test_strips_meta_and_link_tags() {
+    std::string input = "<html><head><meta charset=\"utf-8\">"
+                        "<link rel=\"stylesheet\" href=\"x.css\"></head>"
+                        "<body><meta name=\"viewport\" content=\"width=device-width\">"
+                        "<link rel=\"icon\" href=\"fav.ico\"><p>Keep</p></body></html>";
+    std::string san = sanitize_html(input);
+    std::string sim = simplify_html(input);
+    assert(san.find("Keep") != std::string::npos);
+    assert(sim.find("Keep") != std::string::npos);
+    assert(san.find("<meta") == std::string::npos && san.find("<link") == std::string::npos);
+    assert(sim.find("<meta") == std::string::npos && sim.find("<link") == std::string::npos);
+}
+
+void test_ensure_xhtml_quote_aware_gt() {
+    std::string xhtml = endpaper::ensure_xhtml("<p><img title=\"a > b\" src=\"x.jpg\"></p>");
+    assert(xhtml.find("<img title=\"a > b\" src=\"x.jpg\"/>") != std::string::npos);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -296,11 +331,15 @@ int main() {
     TEST(test_simplify_strips_all_attributes);
     TEST(test_simplify_removes_junk_sections);
     TEST(test_simplify_collapses_br);
+    TEST(test_simplify_separates_table_cells);
     TEST(test_simplify_removes_forms);
     TEST(test_xhtml_nbsp_replaced);
     TEST(test_xhtml_img_self_closed_when_keep_images);
     TEST(test_xhtml_already_self_closed_img_unchanged);
     TEST(test_xhtml_br_self_closed);
+    TEST(test_frameset_null_body_safe);
+    TEST(test_strips_meta_and_link_tags);
+    TEST(test_ensure_xhtml_quote_aware_gt);
 
     std::cout << "\n✓ All sanitizer tests passed!\n";
     return 0;

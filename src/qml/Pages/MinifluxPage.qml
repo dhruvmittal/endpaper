@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -10,21 +9,10 @@ import "../Components" as Components
 Kirigami.Page {
     id: root
     title: "Miniflux Ingest"
-    
-    property bool __ready: false
-    Component.onCompleted: Bridge.pageOpened("miniflux")
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
         anchors.fill: parent
-
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            type: Kirigami.MessageType.Information
-            text: Bridge.statusMessage
-            visible: Bridge.statusMessage !== ""
-            showCloseButton: true
-        }
 
         FormCard.FormHeader {
             title: "Categories"
@@ -34,48 +22,47 @@ Kirigami.Page {
             FormCard.FormButtonDelegate {
                 text: "Fetch Categories"
                 icon.name: "view-refresh"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.fetchMinifluxCategories()
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             FormCard.FormComboBoxDelegate {
                 id: categoryComboBox
                 text: "Category"
                 model: Bridge.minifluxCategoryModel
-                textRole: "title"
+                textRole: "displayTitle"
                 valueRole: "id"
-                onCurrentValueChanged: {
-                    if (root.__ready && currentValue !== undefined) {
+                enabled: !Bridge.isBusy
+                onActivated: {
+                    if (currentValue !== undefined) {
                         Bridge.lastMinifluxCategoryId = currentValue
                         Bridge.fetchMinifluxEntries(currentValue, Bridge.lastMinifluxStatusFilter)
                     }
                 }
 
                 function syncSelection() {
-                    if (Bridge.lastMinifluxCategoryId !== -1 && model.count > 0) {
-                        const idx = model.indexOf(Bridge.lastMinifluxCategoryId)
-                        if (idx !== -1 && currentIndex !== idx) {
-                            currentIndex = idx
-                        }
+                    const idx = model.indexOf(Bridge.lastMinifluxCategoryId)
+                    if (idx !== -1 && currentIndex !== idx) {
+                        currentIndex = idx
                     }
-                    if (model.count > 0) readyTimer.start()
                 }
 
                 Component.onCompleted: syncSelection()
                 Connections {
                     target: categoryComboBox.model
                     function onCountChanged() { categoryComboBox.syncSelection() }
+                    function onModelReset() { categoryComboBox.syncSelection() }
                 }
-                Timer {
-                    id: readyTimer
-                    interval: 100
-                    onTriggered: root.__ready = true
+                Connections {
+                    target: Bridge
+                    function onLastMinifluxCategoryIdChanged() { categoryComboBox.syncSelection() }
                 }
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             Item {
                 Layout.fillWidth: true
                 implicitHeight: Kirigami.Units.gridUnit * 2
@@ -87,41 +74,34 @@ Kirigami.Page {
                         text: "Status Filter"
                         Layout.fillWidth: true
                     }
-                    Controls.RadioButton {
-                        text: "Unread"
-                        checked: Bridge.lastMinifluxStatusFilter === 0
-                        onClicked: {
-                            Bridge.lastMinifluxStatusFilter = 0
-                            Bridge.fetchMinifluxEntries(categoryComboBox.currentValue, 0)
-                        }
-                    }
-                    Controls.RadioButton {
-                        text: "Starred"
-                        checked: Bridge.lastMinifluxStatusFilter === 1
-                        onClicked: {
-                            Bridge.lastMinifluxStatusFilter = 1
-                            Bridge.fetchMinifluxEntries(categoryComboBox.currentValue, 1)
-                        }
-                    }
-                    Controls.RadioButton {
-                        text: "All"
-                        checked: Bridge.lastMinifluxStatusFilter === 2
-                        onClicked: {
-                            Bridge.lastMinifluxStatusFilter = 2
-                            Bridge.fetchMinifluxEntries(categoryComboBox.currentValue, 2)
+                    Repeater {
+                        model: ["Unread", "Starred", "All"]
+                        delegate: Controls.RadioButton {
+                            required property int index
+                            required property string modelData
+                            text: modelData
+                            enabled: !Bridge.isBusy
+                            checked: Bridge.lastMinifluxStatusFilter === index
+                            onClicked: {
+                                checked = Qt.binding(function() { return Bridge.lastMinifluxStatusFilter === index })
+                                Bridge.lastMinifluxStatusFilter = index
+                                let catId = categoryComboBox.currentValue !== undefined ? categoryComboBox.currentValue : -1
+                                Bridge.fetchMinifluxEntries(catId, index)
+                            }
                         }
                     }
                 }
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             FormCard.FormButtonDelegate {
                 text: "Fetch Entries"
                 icon.name: "download"
+                enabled: !Bridge.isBusy
                 onClicked: {
-                    let catId = categoryComboBox.currentValue !== undefined ? categoryComboBox.currentValue : -1;
-                    Bridge.fetchMinifluxEntries(catId, Bridge.lastMinifluxStatusFilter);
+                    let catId = categoryComboBox.currentValue !== undefined ? categoryComboBox.currentValue : -1
+                    Bridge.fetchMinifluxEntries(catId, Bridge.lastMinifluxStatusFilter)
                 }
             }
         }
@@ -134,31 +114,29 @@ Kirigami.Page {
             Layout.fillWidth: true
             Layout.fillHeight: true
             filterModel: Bridge.minifluxFilterModel
-            searchPlaceholder: "Filter RSS entries..."
+            searchPlaceholder: "Filter Miniflux entries..."
+            emptyText: "Click Fetch Entries to load articles from Miniflux"
         }
-        
+
         RowLayout {
             Layout.fillWidth: true
             Controls.Button {
                 text: "Select All"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.minifluxFilterModel.selectAll()
             }
             Controls.Button {
                 text: "Deselect All"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.minifluxFilterModel.deselectAll()
             }
             Item { Layout.fillWidth: true }
             Controls.Label { text: "Book:" }
-            Controls.ComboBox {
-                model: Bridge.bookModel
-                textRole: "title"
-                valueRole: "id"
-                currentIndex: Bridge.bookModel.indexOf(Bridge.selectedBookId)
-                onActivated: Bridge.selectedBookId = currentValue
-            }
+            Components.BookSelector {}
             Controls.Button {
-                text: "Stage Selected"
+                text: "Stage Selected (" + Bridge.minifluxFilterModel.selectedCount + ")"
                 icon.name: "mail-forward"
+                enabled: !Bridge.isBusy && Bridge.minifluxFilterModel.selectedCount > 0 && Bridge.selectedBookId !== -1
                 onClicked: Bridge.stageSelectedMiniflux()
             }
         }

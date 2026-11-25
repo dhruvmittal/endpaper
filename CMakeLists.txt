@@ -10,11 +10,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_TUI "Build TUI application" ON)
 option(BUILD_GUI "Build GUI application (Qt/Kirigami)" ON)
 
-# ── Qt6 (required by Akonadi, GUI, Network) ────────────────────────────────
+# ── Qt6 ────────────────────────────────────────────────────────────────────
 if (BUILD_GUI)
-    find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2)
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2)
 else()
-    find_package(Qt6 REQUIRED COMPONENTS Core Gui Network)
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 endif()
 set(CMAKE_AUTOMOC ON)
 
@@ -23,37 +23,42 @@ find_package(ECM REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH} ${CMAKE_MODULE_PATH})
 
 # ── KDE Frameworks 6 ──────────────────────────────────────────────────────
-find_package(KPim6Mime REQUIRED)
+find_package(KF6Mime QUIET)
+if(KF6Mime_FOUND)
+    set(KMIME_TARGET KF6::Mime)
+else()
+    find_package(KPim6Mime REQUIRED)
+    set(KMIME_TARGET KPim6::Mime)
+endif()
 find_package(KPim6Akonadi REQUIRED)
 find_package(KPim6AkonadiMime REQUIRED)
 if (BUILD_GUI)
     find_package(KF6 REQUIRED COMPONENTS Kirigami I18n)
 endif()
 
-# ── Kirigami (runtime-only, discovered via QML2_IMPORT_PATH) ──────────────
-
 find_package(Threads REQUIRED)
 
 # ── FTXUI ──────────────────────────────────────────────────────────────────
-find_package(ftxui QUIET)
-if(NOT ftxui_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-      ftxui
-      GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
-      GIT_TAG main # This gets the latest, or use a specific tag like v5.0.0
-    )
-    FetchContent_MakeAvailable(ftxui)
+if (BUILD_TUI)
+    find_package(ftxui QUIET)
+    if(NOT ftxui_FOUND)
+        include(FetchContent)
+        FetchContent_Declare(
+          ftxui
+          GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+          GIT_TAG main
+        )
+        FetchContent_MakeAvailable(ftxui)
 
-    # If FetchContent provided bare targets, create namespaced aliases for consistency
-    if(TARGET screen AND NOT TARGET ftxui::screen)
-        add_library(ftxui::screen ALIAS screen)
-    endif()
-    if(TARGET dom AND NOT TARGET ftxui::dom)
-        add_library(ftxui::dom ALIAS dom)
-    endif()
-    if(TARGET component AND NOT TARGET ftxui::component)
-        add_library(ftxui::component ALIAS component)
+        if(TARGET screen AND NOT TARGET ftxui::screen)
+            add_library(ftxui::screen ALIAS screen)
+        endif()
+        if(TARGET dom AND NOT TARGET ftxui::dom)
+            add_library(ftxui::dom ALIAS dom)
+        endif()
+        if(TARGET component AND NOT TARGET ftxui::component)
+            add_library(ftxui::component ALIAS component)
+        endif()
     endif()
 endif()
 
@@ -67,7 +72,7 @@ pkg_check_modules(LIBZIP REQUIRED libzip)
 # ── pugixml (for RSS parsing) ──────────────────────────────────────────────
 find_package(pugixml REQUIRED)
 
-# ── Lexbor (for HTML sanitation) ───────────────────────────────────────────
+# ── Lexbor (for HTML sanitation & extraction) ──────────────────────────────
 find_path(LEXBOR_INCLUDE_DIR NAMES lexbor/html/parser.h)
 find_library(LEXBOR_LIBRARY NAMES lexbor)
 if (LEXBOR_INCLUDE_DIR AND LEXBOR_LIBRARY)
@@ -84,55 +89,103 @@ find_package(CURL REQUIRED)
 # ── nlohmann_json (for JSON parsing) ───────────────────────────────────────
 find_package(nlohmann_json REQUIRED)
 
-
-
-# ── Source files ───────────────────────────────────────────────────────────
-set(ENDPAPER_SOURCES
-    src/main.cpp
+# ── Shared Core Library ────────────────────────────────────────────────────
+add_library(endpaper_core STATIC
     src/config.cpp
     src/database.cpp
     src/html_sanitizer.cpp
     src/epub_builder.cpp
-    src/akonadi_fetcher.cpp
+    src/http_client.cpp
+    src/html_extractor.cpp
+    src/build_pipeline.cpp
     src/rss_fetcher.cpp
     src/miniflux_fetcher.cpp
-    src/html_extractor.cpp
-    src/tui_app.cpp
+    src/akonadi_fetcher.cpp
 )
 
-if (BUILD_TUI)
-    add_executable(endpaper ${ENDPAPER_SOURCES})
-
-target_include_directories(endpaper PRIVATE
+target_include_directories(endpaper_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${LEXBOR_INCLUDE_DIRS}
     ${SQLITE3_INCLUDE_DIRS}
     ${LIBZIP_INCLUDE_DIRS}
 )
 
-target_link_libraries(endpaper PRIVATE
+target_link_libraries(endpaper_core PUBLIC
     Qt6::Core
     Qt6::Gui
     CURL::libcurl
-    KPim6::Mime
+    nlohmann_json::nlohmann_json
+    pugixml::pugixml
+    ${KMIME_TARGET}
     KPim6::AkonadiCore
     KPim6::AkonadiMime
-    ftxui::component
-    ftxui::dom
-    ftxui::screen
-    Threads::Threads
-    pugixml::pugixml
     ${SQLITE3_LIBRARIES}
     ${LIBZIP_LIBRARIES}
     ${LEXBOR_LIBRARIES}
+    Threads::Threads
 )
 
-target_link_directories(endpaper PRIVATE
+target_link_directories(endpaper_core PUBLIC
     ${SQLITE3_LIBRARY_DIRS}
     ${LIBZIP_LIBRARY_DIRS}
 )
 
+target_compile_options(endpaper_core PRIVATE -Wall -Wextra -Wpedantic)
+
+# ── TUI executable ─────────────────────────────────────────────────────────
+if (BUILD_TUI)
+    add_executable(endpaper
+        src/main.cpp
+        src/tui_app.cpp
+    )
+
+    target_link_libraries(endpaper PRIVATE
+        endpaper_core
+        ftxui::component
+        ftxui::dom
+        ftxui::screen
+    )
+
     target_compile_options(endpaper PRIVATE -Wall -Wextra -Wpedantic)
     install(TARGETS endpaper DESTINATION bin)
+endif()
+
+# ── GUI executable ─────────────────────────────────────────────────────────
+if (BUILD_GUI)
+    qt_add_executable(endpaper-qt
+        src/qt_main.cpp
+        src/endpaper_bridge.cpp
+        src/endpaper_bridge.h
+        src/qml_models.h
+    )
+
+    qt_add_resources(endpaper-qt "qml"
+        PREFIX "/org/kde/endpaper/"
+        FILES
+            src/qml/main.qml
+            src/qml/Components/ArticleListView.qml
+            src/qml/Components/BookSelector.qml
+            src/qml/Pages/SettingsPage.qml
+            src/qml/Pages/IngestPage.qml
+            src/qml/Pages/MinifluxPage.qml
+            src/qml/Pages/RssPage.qml
+            src/qml/Pages/BooksPage.qml
+            src/qml/Pages/BuildPage.qml
+    )
+
+    target_link_libraries(endpaper-qt PRIVATE
+        endpaper_core
+        Qt6::Qml Qt6::Quick Qt6::QuickControls2
+        KF6::I18n
+    )
+
+    if (TARGET KF6::I18nQml)
+        target_link_libraries(endpaper-qt PRIVATE KF6::I18nQml)
+        target_compile_definitions(endpaper-qt PRIVATE ENDPAPER_HAS_I18NQML=1)
+    endif()
+
+    target_compile_options(endpaper-qt PRIVATE -Wall -Wextra -Wpedantic)
+    install(TARGETS endpaper-qt DESTINATION bin)
 endif()
 
 # ── Tests ──────────────────────────────────────────────────────────────────
@@ -140,69 +193,4 @@ option(BUILD_TESTS "Build tests" ON)
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
-endif()
-
-# ── install ────────────────────────────────────────────────────────────────
-# Moved inside target blocks
-
-# ── GUI executable ─────────────────────────────────────────────────────────
-if (BUILD_GUI)
-
-qt_add_executable(endpaper-qt
-    src/qt_main.cpp
-    src/config.cpp
-    src/database.cpp
-    src/html_sanitizer.cpp
-    src/epub_builder.cpp
-    src/akonadi_fetcher.cpp
-    src/rss_fetcher.cpp
-    src/miniflux_fetcher.cpp
-    src/html_extractor.cpp
-    src/endpaper_bridge.cpp
-    src/endpaper_bridge.h
-    src/qml_models.h
-)
-
-qt_add_resources(endpaper-qt "qml"
-    PREFIX "/org/kde/endpaper/"
-    FILES
-        src/qml/main.qml
-        src/qml/Components/ArticleListView.qml
-        src/qml/Pages/SettingsPage.qml
-        src/qml/Pages/IngestPage.qml
-        src/qml/Pages/MinifluxPage.qml
-        src/qml/Pages/RssPage.qml
-        src/qml/Pages/BooksPage.qml
-        src/qml/Pages/BuildPage.qml
-)
-
-target_include_directories(endpaper-qt PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${SQLITE3_INCLUDE_DIRS}
-    ${LIBZIP_INCLUDE_DIRS}
-)
-
-target_link_libraries(endpaper-qt PRIVATE
-    Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2
-    KF6::I18n
-    KPim6::Mime KPim6::AkonadiCore KPim6::AkonadiMime
-    CURL::libcurl
-    nlohmann_json::nlohmann_json
-    pugixml::pugixml
-    ${SQLITE3_LIBRARIES}
-    ${LIBZIP_LIBRARIES}
-    ${LEXBOR_LIBRARIES}
-)
-
-target_link_directories(endpaper-qt PRIVATE
-    ${SQLITE3_LIBRARY_DIRS}
-)
-    install(TARGETS endpaper-qt DESTINATION bin)
-endif()
-
-# ── Unit tests ─────────────────────────────────────────────────────────────
-if(BUILD_TESTS)
-    add_executable(test_html_extractor tests/test_html_extractor.cpp src/html_extractor.cpp)
-    target_link_libraries(test_html_extractor PRIVATE Qt6::Core CURL::libcurl)
-    target_include_directories(test_html_extractor PRIVATE src)
 endif()

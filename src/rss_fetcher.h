@@ -3,7 +3,6 @@
 #include <future>
 #include <string>
 #include <vector>
-#include <memory>
 
 namespace endpaper {
 
@@ -15,13 +14,11 @@ struct RssItem {
     std::string date;
 };
 
-class RssFetcherPrivate;
-
-/// Fetches and parses RSS/Atom feeds using QtNetwork and pugixml.
+/// Fetches and parses RSS/Atom feeds using libcurl and pugixml.
 class RssFetcher {
 public:
-    RssFetcher();
-    ~RssFetcher();
+    RssFetcher() = default;
+    ~RssFetcher() = default;
 
     /// Fetch items from a feed URL.
     /// Returns a future that resolves to the list of items.
@@ -31,9 +28,6 @@ public:
     /// Static helper for unit testing and internal parsing.
     /// @param max_items Maximum articles to parse (0 = unlimited).
     static std::vector<RssItem> parse_xml(const std::string& xml_data, size_t max_items = 0);
-
-private:
-    std::unique_ptr<RssFetcherPrivate> d;
 };
 
 } // namespace endpaper

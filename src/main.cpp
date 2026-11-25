@@ -4,6 +4,7 @@
 #include "rss_fetcher.h"
 #include "miniflux_fetcher.h"
 #include "html_extractor.h"
+#include "http_client.h"
 #include "tui_app.h"
 
 #include <QCoreApplication>
@@ -42,6 +43,7 @@ private:
 };
 
 int main(int argc, char* argv[]) {
+    endpaper::init_http_client();
     // Qt requires QCoreApplication for Akonadi signal/slot mechanism
     QCoreApplication qt_app(argc, argv);
     qt_app.setApplicationName("endpaper");

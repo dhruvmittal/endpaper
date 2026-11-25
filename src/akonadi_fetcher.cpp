@@ -8,26 +8,101 @@
 #include <Akonadi/ServerManager>
 
 #include <KMime/Message>
+#include <KMime/Util>
 
-#include <QCoreApplication>
-#include <QEventLoop>
+#include <QMetaObject>
+#include <QObject>
 #include <QThread>
 
-#include <iostream>
-#include <thread>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
 
 namespace endpaper {
+
+namespace {
+
+template <typename T>
+struct MessagePtrType {
+    using type = std::shared_ptr<T>;
+};
+
+template <typename T>
+    requires requires { typename T::Ptr; }
+struct MessagePtrType<T> {
+    using type = typename T::Ptr;
+};
+
+using MessagePtr = typename MessagePtrType<KMime::Message>::type;
+
+template <typename T>
+std::future<T> make_error_future(const std::string& message) {
+    std::promise<T> p;
+    p.set_exception(std::make_exception_ptr(std::runtime_error(message)));
+    return p.get_future();
+}
+
+} // namespace
 
 // ── Pimpl ─────────────────────────────────────────────────────────────────
 
 struct AkonadiFetcher::Impl {
+    std::mutex mu;
+    QThread thread;
+    QObject* worker = nullptr;
+    bool started = false;
+    std::atomic<bool> stopping{false};
+
+    ~Impl() {
+        stop();
+    }
+
+    void stop() {
+        QObject* w = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            stopping.store(true);
+            if (!started) return;
+            w = worker;
+            started = false;
+        }
+        if (w) {
+            QMetaObject::invokeMethod(w, [this, w]() {
+                const auto jobs = w->findChildren<KJob*>(Qt::FindDirectChildrenOnly);
+                for (KJob* j : jobs) {
+                    delete j;
+                }
+                thread.quit();
+            }, Qt::QueuedConnection);
+        } else {
+            thread.quit();
+        }
+        thread.wait();
+        worker = nullptr;
+    }
+
+    QObject* ensure_worker() {
+        std::lock_guard<std::mutex> lock(mu);
+        if (stopping.load()) return nullptr;
+        if (!started) {
+            worker = new QObject();
+            worker->moveToThread(&thread);
+            QObject::connect(&thread, &QThread::finished, worker, &QObject::deleteLater);
+            thread.start();
+            started = true;
+        }
+        return worker;
+    }
+
     // Helper: find the best text body from a KMime message
-    static std::string extract_body(const KMime::Message::Ptr& msg) {
+    static std::string extract_body(const KMime::Message* msg) {
+        if (!msg) return "";
         // Prefer text/html, fall back to text/plain
-        if (auto* html_part = msg->mainBodyPart("text/html")) {
+        if (const auto* html_part = msg->mainBodyPart("text/html")) {
             return html_part->decodedText().toStdString();
         }
-        if (auto* text_part = msg->mainBodyPart("text/plain")) {
+        if (const auto* text_part = msg->mainBodyPart("text/plain")) {
             return plain_text_to_html(
                 text_part->decodedText().toStdString());
         }
@@ -43,6 +118,10 @@ AkonadiFetcher::AkonadiFetcher()
 
 AkonadiFetcher::~AkonadiFetcher() = default;
 
+void AkonadiFetcher::stop() {
+    impl_->stop();
+}
+
 // ── Availability check ────────────────────────────────────────────────────
 
 bool AkonadiFetcher::is_available() const {
@@ -52,33 +131,44 @@ bool AkonadiFetcher::is_available() const {
 // ── Fetch folders ─────────────────────────────────────────────────────────
 
 std::future<std::vector<FolderInfo>> AkonadiFetcher::fetch_folders() {
-    return std::async(std::launch::async, []() -> std::vector<FolderInfo> {
-        std::vector<FolderInfo> folders;
+    if (!is_available()) {
+        return make_error_future<std::vector<FolderInfo>>(
+            "Akonadi server is not running (try: akonadictl start)");
+    }
 
-        // Create a local event loop for synchronous waiting on the job
-        QEventLoop loop;
+    QObject* worker = impl_->ensure_worker();
+    if (!worker) {
+        return make_error_future<std::vector<FolderInfo>>("Akonadi fetcher is shutting down");
+    }
 
+    auto prom = std::make_shared<std::promise<std::vector<FolderInfo>>>();
+    auto fut = prom->get_future();
+
+    QMetaObject::invokeMethod(worker, [worker, prom]() {
         auto* job = new Akonadi::CollectionFetchJob(
             Akonadi::Collection::root(),
-            Akonadi::CollectionFetchJob::Recursive);
+            Akonadi::CollectionFetchJob::Recursive,
+            worker);
 
         job->fetchScope().setContentMimeTypes({"message/rfc822"});
 
         QObject::connect(job, &Akonadi::CollectionFetchJob::result,
-                         &loop, [&](KJob* j) {
+                         worker, [prom](KJob* j) {
             if (j->error()) {
-                std::cerr << "[endpaper] Collection fetch error: "
-                          << j->errorString().toStdString() << "\n";
-            } else {
-                auto* fetch_job =
-                    qobject_cast<Akonadi::CollectionFetchJob*>(j);
+                prom->set_exception(std::make_exception_ptr(
+                    std::runtime_error("KMail folder fetch error: " + j->errorString().toStdString())));
+                return;
+            }
+            try {
+                auto* fetch_job = qobject_cast<Akonadi::CollectionFetchJob*>(j);
                 const auto collections = fetch_job->collections();
+                std::vector<FolderInfo> folders;
+                folders.reserve(static_cast<size_t>(collections.size()));
                 for (const auto& col : collections) {
                     FolderInfo fi;
                     fi.collection_id = col.id();
                     fi.name = col.displayName().toStdString();
 
-                    // Build full path by walking parents
                     std::string path = fi.name;
                     auto parent = col.parentCollection();
                     while (parent.isValid() &&
@@ -87,87 +177,99 @@ std::future<std::vector<FolderInfo>> AkonadiFetcher::fetch_folders() {
                         parent = parent.parentCollection();
                     }
                     fi.full_path = path;
-
                     folders.push_back(std::move(fi));
                 }
+                prom->set_value(std::move(folders));
+            } catch (...) {
+                prom->set_exception(std::current_exception());
             }
-            loop.quit();
         });
 
         job->start();
-        loop.exec();
+    }, Qt::QueuedConnection);
 
-        return folders;
-    });
+    return fut;
 }
 
 // ── Fetch emails ──────────────────────────────────────────────────────────
 
 std::future<std::vector<EmailItem>>
 AkonadiFetcher::fetch_emails(int64_t collection_id) {
-    return std::async(std::launch::async,
-                      [this, collection_id]() -> std::vector<EmailItem> {
-        std::vector<EmailItem> emails;
+    if (!is_available()) {
+        return make_error_future<std::vector<EmailItem>>(
+            "Akonadi server is not running (try: akonadictl start)");
+    }
 
-        QEventLoop loop;
+    QObject* worker = impl_->ensure_worker();
+    if (!worker) {
+        return make_error_future<std::vector<EmailItem>>("Akonadi fetcher is shutting down");
+    }
 
+    auto prom = std::make_shared<std::promise<std::vector<EmailItem>>>();
+    auto fut = prom->get_future();
+
+    QMetaObject::invokeMethod(worker, [worker, prom, collection_id]() {
         Akonadi::Collection col(collection_id);
-        auto* job = new Akonadi::ItemFetchJob(col);
+        auto* job = new Akonadi::ItemFetchJob(col, worker);
         job->fetchScope().fetchFullPayload(true);
 
         QObject::connect(job, &Akonadi::ItemFetchJob::result,
-                         &loop, [&](KJob* j) {
+                         worker, [prom](KJob* j) {
             if (j->error()) {
-                std::cerr << "[endpaper] Item fetch error: "
-                          << j->errorString().toStdString() << "\n";
-            } else {
-                auto* fetch_job =
-                    qobject_cast<Akonadi::ItemFetchJob*>(j);
+                prom->set_exception(std::make_exception_ptr(
+                    std::runtime_error("KMail email fetch error: " + j->errorString().toStdString())));
+                return;
+            }
+            try {
+                auto* fetch_job = qobject_cast<Akonadi::ItemFetchJob*>(j);
                 const auto items = fetch_job->items();
+                std::vector<EmailItem> emails;
+                emails.reserve(static_cast<size_t>(items.size()));
                 for (const auto& item : items) {
-                    KMime::Message::Ptr msg;
+                    MessagePtr msg;
 
-                    // Try typed payload first (works if serializer
-                    // plugin is loaded)
-                    if (item.hasPayload<KMime::Message::Ptr>()) {
-                        msg = item.payload<KMime::Message::Ptr>();
+                    // Akonadi serializer already parsed the message when hasPayload is true;
+                    // calling parse() a second time strips multipart sub-contents.
+                    if (item.hasPayload<MessagePtr>()) {
+                        msg = item.payload<MessagePtr>();
+                        if (!msg) continue;
                     } else {
-                        // Fallback: parse raw payload bytes directly.
-                        // This bypasses the serializer plugin entirely.
                         QByteArray rawData = item.payloadData();
                         if (rawData.isEmpty()) {
                             continue;
                         }
-                        msg = KMime::Message::Ptr(new KMime::Message);
-                        msg->setContent(rawData);
+                        msg = MessagePtr(new KMime::Message);
+                        msg->setContent(KMime::CRLFtoLF(rawData));
+                        msg->parse();
                     }
 
-                    msg->parse();
+                    const KMime::Message& cmsg = *msg;
 
                     EmailItem ei;
                     ei.akonadi_id = item.id();
-                    ei.subject = msg->subject()
-                        ? msg->subject()->asUnicodeString().toStdString()
+                    ei.subject = cmsg.subject()
+                        ? cmsg.subject()->asUnicodeString().toStdString()
                         : "(no subject)";
-                    ei.sender = msg->from()
-                        ? msg->from()->asUnicodeString().toStdString()
+                    ei.sender = cmsg.from()
+                        ? cmsg.from()->asUnicodeString().toStdString()
                         : "(unknown sender)";
-                    ei.date = msg->date()
-                        ? msg->date()->asUnicodeString().toStdString()
+                    ei.date = cmsg.date()
+                        ? cmsg.date()->asUnicodeString().toStdString()
                         : "";
-                    ei.html_body = Impl::extract_body(msg);
+                    ei.html_body = Impl::extract_body(&cmsg);
 
                     emails.push_back(std::move(ei));
                 }
+                prom->set_value(std::move(emails));
+            } catch (...) {
+                prom->set_exception(std::current_exception());
             }
-            loop.quit();
         });
 
         job->start();
-        loop.exec();
+    }, Qt::QueuedConnection);
 
-        return emails;
-    });
+    return fut;
 }
 
 } // namespace endpaper

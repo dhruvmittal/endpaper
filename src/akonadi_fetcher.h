@@ -32,6 +32,9 @@ public:
     AkonadiFetcher(const AkonadiFetcher&) = delete;
     AkonadiFetcher& operator=(const AkonadiFetcher&) = delete;
 
+    /// Stop the background worker thread and cancel pending jobs cleanly.
+    void stop();
+
     /// Check if the Akonadi server is running and reachable.
     [[nodiscard]] bool is_available() const;
 

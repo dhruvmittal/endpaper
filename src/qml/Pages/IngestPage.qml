@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -11,58 +10,42 @@ Kirigami.Page {
     id: root
     title: "KMail Ingest"
 
-    property bool __ready: false
-    Component.onCompleted: Bridge.pageOpened("kmail")
-
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
         anchors.fill: parent
 
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            type: Kirigami.MessageType.Information
-            text: Bridge.statusMessage
-            visible: Bridge.statusMessage !== ""
-            showCloseButton: true
-        }
-
-
         FormCard.FormHeader {
-            title: "Akonadi Headers"
+            title: "Akonadi Folders"
         }
 
         FormCard.FormCard {
             FormCard.FormButtonDelegate {
                 text: "Fetch Folders"
                 icon.name: "view-refresh"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.fetchFolders()
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             FormCard.FormComboBoxDelegate {
                 id: folderComboBox
                 text: "Folder"
                 model: Bridge.folderModel
                 textRole: "fullPath"
                 valueRole: "collectionId"
-                onCurrentValueChanged: {
-                    if (root.__ready && currentValue !== undefined) {
+                enabled: !Bridge.isBusy
+                onActivated: {
+                    if (currentValue !== undefined) {
                         Bridge.lastKMailCollectionId = currentValue
                         Bridge.fetchEmails(currentValue)
                     }
                 }
-                
+
                 function syncSelection() {
-                    if (Bridge.lastKMailCollectionId !== -1 && model.count > 0) {
-                        const idx = model.indexOf(Bridge.lastKMailCollectionId)
-                        if (idx !== -1 && currentIndex !== idx) {
-                            currentIndex = idx
-                        }
-                    }
-                    // After the first count or completed, we consider it ready
-                    if (model.count > 0) {
-                        readyTimer.start()
+                    const idx = model.indexOf(Bridge.lastKMailCollectionId)
+                    if (idx !== -1 && currentIndex !== idx) {
+                        currentIndex = idx
                     }
                 }
 
@@ -70,24 +53,25 @@ Kirigami.Page {
                 Connections {
                     target: folderComboBox.model
                     function onCountChanged() { folderComboBox.syncSelection() }
+                    function onModelReset() { folderComboBox.syncSelection() }
                 }
-                Timer {
-                    id: readyTimer
-                    interval: 100
-                    onTriggered: root.__ready = true
+                Connections {
+                    target: Bridge
+                    function onLastKMailCollectionIdChanged() { folderComboBox.syncSelection() }
                 }
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             FormCard.FormButtonDelegate {
                 text: "Fetch Emails"
                 icon.name: "mail-folder-inbox"
+                enabled: !Bridge.isBusy && folderComboBox.currentValue !== undefined
                 onClicked: {
-                    // This button is now redundant as fetching happens on combo box change
-                    // if (folderComboBox.currentValue !== undefined) {
-                    //     Bridge.fetchEmails(folderComboBox.currentValue)
-                    // }
+                    if (folderComboBox.currentValue !== undefined) {
+                        Bridge.lastKMailCollectionId = folderComboBox.currentValue
+                        Bridge.fetchEmails(folderComboBox.currentValue)
+                    }
                 }
             }
         }
@@ -101,30 +85,28 @@ Kirigami.Page {
             Layout.fillHeight: true
             filterModel: Bridge.emailFilterModel
             searchPlaceholder: "Filter emails..."
+            emptyText: "Select a folder and click Fetch Emails"
         }
-        
+
         RowLayout {
             Layout.fillWidth: true
             Controls.Button {
                 text: "Select All"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.emailFilterModel.selectAll()
             }
             Controls.Button {
                 text: "Deselect All"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.emailFilterModel.deselectAll()
             }
             Item { Layout.fillWidth: true }
             Controls.Label { text: "Book:" }
-            Controls.ComboBox {
-                model: Bridge.bookModel
-                textRole: "title"
-                valueRole: "id"
-                currentIndex: Bridge.bookModel.indexOf(Bridge.selectedBookId)
-                onActivated: Bridge.selectedBookId = currentValue
-            }
+            Components.BookSelector {}
             Controls.Button {
-                text: "Stage Selected"
+                text: "Stage Selected (" + Bridge.emailFilterModel.selectedCount + ")"
                 icon.name: "mail-forward"
+                enabled: !Bridge.isBusy && Bridge.emailFilterModel.selectedCount > 0 && Bridge.selectedBookId !== -1
                 onClicked: Bridge.stageSelectedEmails()
             }
         }

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -30,6 +32,11 @@ public:
                               const std::string& key,
                               int default_val = 0) const;
 
+    /// Get a config value as a 64-bit integer.
+    [[nodiscard]] int64_t get_int64(const std::string& section,
+                                    const std::string& key,
+                                    int64_t default_val = 0) const;
+
     /// Get a config value as a boolean.
     [[nodiscard]] bool get_bool(const std::string& section,
                                 const std::string& key,
@@ -39,7 +46,7 @@ public:
     void set(const std::string& section, const std::string& key,
              const std::string& value);
 
-    /// Write current config to disk.
+    /// Write current config to disk atomically (created with mode 0600).
     void save() const;
 
     /// Reload config from disk.
@@ -48,11 +55,17 @@ public:
 private:
     void ensure_directories();
     void parse_file(const std::filesystem::path& path);
+    void migrate_legacy_keys_unlocked();
+    [[nodiscard]] std::string get_unlocked(const std::string& section,
+                                           const std::string& key,
+                                           const std::string& default_val) const;
+    static bool parse_bool(const std::string& val, bool default_val);
 
     std::filesystem::path config_dir_;
     std::filesystem::path data_dir_;
     std::filesystem::path state_dir_;
 
+    mutable std::mutex mu_;
     // section -> (key -> value)
     std::unordered_map<std::string,
                        std::unordered_map<std::string, std::string>> values_;

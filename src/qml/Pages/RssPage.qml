@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -11,19 +10,21 @@ Kirigami.Page {
     id: root
     title: "RSS Feed Ingest"
 
-    property bool __ready: false
+    Kirigami.PromptDialog {
+        id: removeFeedDialog
+        title: "Remove RSS Feed"
+        subtitle: "Remove \"" + feedComboBox.currentText + "\" from your saved feeds?"
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: {
+            if (feedComboBox.currentValue !== undefined) {
+                Bridge.removeRssFeed(feedComboBox.currentValue)
+            }
+        }
+    }
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
         anchors.fill: parent
-
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            type: Kirigami.MessageType.Information
-            text: Bridge.statusMessage
-            visible: Bridge.statusMessage !== ""
-            showCloseButton: true
-        }
 
         FormCard.FormHeader {
             title: "Manage Feeds"
@@ -33,80 +34,87 @@ Kirigami.Page {
             FormCard.FormTextFieldDelegate {
                 id: feedTitleInput
                 label: "Title"
-                text: "New Feed"
+                placeholderText: "My Blog Feed"
+                text: ""
             }
             FormCard.FormTextFieldDelegate {
                 id: feedUrlInput
                 label: "URL"
-                text: "https://"
+                placeholderText: "https://example.com/feed.xml"
+                text: ""
+                onAccepted: {
+                    if (!Bridge.isBusy && feedTitleInput.text.trim() !== "" && feedUrlInput.text.trim() !== "") {
+                        Bridge.addRssFeed(feedTitleInput.text, feedUrlInput.text)
+                        feedTitleInput.text = ""
+                        feedUrlInput.text = ""
+                    }
+                }
             }
             FormCard.FormButtonDelegate {
                 text: "Add Feed"
                 icon.name: "list-add"
+                enabled: !Bridge.isBusy && feedTitleInput.text.trim() !== "" && feedUrlInput.text.trim() !== ""
                 onClicked: {
                     Bridge.addRssFeed(feedTitleInput.text, feedUrlInput.text)
-                    feedTitleInput.text = "New Feed"
-                    feedUrlInput.text = "https://"
+                    feedTitleInput.text = ""
+                    feedUrlInput.text = ""
                 }
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             FormCard.FormComboBoxDelegate {
                 id: feedComboBox
                 text: "Feed"
                 model: Bridge.rssFeedModel
                 textRole: "title"
                 valueRole: "id"
-                onCurrentValueChanged: {
-                    if (root.__ready && currentValue !== undefined) {
+                enabled: !Bridge.isBusy
+                onActivated: {
+                    if (currentValue !== undefined) {
                         Bridge.lastRssFeedId = currentValue
                         Bridge.fetchRssEntries(currentValue)
                     }
                 }
 
                 function syncSelection() {
-                    if (Bridge.lastRssFeedId !== -1 && model.count > 0) {
-                        const idx = model.indexOf(Bridge.lastRssFeedId)
-                        if (idx !== -1 && currentIndex !== idx) {
-                            currentIndex = idx
-                        }
+                    const idx = model.indexOf(Bridge.lastRssFeedId)
+                    if (idx !== -1 && currentIndex !== idx) {
+                        currentIndex = idx
                     }
-                    if (model.count > 0) readyTimer.start()
                 }
 
                 Component.onCompleted: syncSelection()
                 Connections {
                     target: feedComboBox.model
                     function onCountChanged() { feedComboBox.syncSelection() }
+                    function onModelReset() { feedComboBox.syncSelection() }
                 }
-                Timer {
-                    id: readyTimer
-                    interval: 100
-                    onTriggered: root.__ready = true
+                Connections {
+                    target: Bridge
+                    function onLastRssFeedIdChanged() { feedComboBox.syncSelection() }
                 }
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             FormCard.FormButtonDelegate {
                 text: "Remove Selected Feed"
                 icon.name: "list-remove"
-                onClicked: {
-                    if (feedComboBox.currentValue !== undefined) {
-                        Bridge.removeRssFeed(feedComboBox.currentValue)
-                    }
-                }
+                enabled: !Bridge.isBusy && feedComboBox.currentValue !== undefined
+                onClicked: removeFeedDialog.open()
             }
-            
+
             FormCard.FormDelegateSeparator {}
-            
+
             FormCard.FormButtonDelegate {
                 text: "Fetch Entries"
                 icon.name: "download"
+                enabled: !Bridge.isBusy && feedComboBox.currentValue !== undefined
                 onClicked: {
                     if (feedComboBox.currentValue !== undefined) {
-                        Bridge.fetchRssEntries(feedComboBox.currentValue);
+                        Bridge.lastRssFeedId = feedComboBox.currentValue
+                        Bridge.fetchRssEntries(feedComboBox.currentValue)
                     }
                 }
             }
@@ -121,30 +129,28 @@ Kirigami.Page {
             Layout.fillHeight: true
             filterModel: Bridge.rssFilterModel
             searchPlaceholder: "Filter RSS entries..."
+            emptyText: "Select a feed and click Fetch Entries"
         }
-        
+
         RowLayout {
             Layout.fillWidth: true
             Controls.Button {
                 text: "Select All"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.rssFilterModel.selectAll()
             }
             Controls.Button {
                 text: "Deselect All"
+                enabled: !Bridge.isBusy
                 onClicked: Bridge.rssFilterModel.deselectAll()
             }
             Item { Layout.fillWidth: true }
             Controls.Label { text: "Book:" }
-            Controls.ComboBox {
-                model: Bridge.bookModel
-                textRole: "title"
-                valueRole: "id"
-                currentIndex: Bridge.bookModel.indexOf(Bridge.selectedBookId)
-                onActivated: Bridge.selectedBookId = currentValue
-            }
+            Components.BookSelector {}
             Controls.Button {
-                text: "Stage Selected"
+                text: "Stage Selected (" + Bridge.rssFilterModel.selectedCount + ")"
                 icon.name: "mail-forward"
+                enabled: !Bridge.isBusy && Bridge.rssFilterModel.selectedCount > 0 && Bridge.selectedBookId !== -1
                 onClicked: Bridge.stageSelectedRss()
             }
         }

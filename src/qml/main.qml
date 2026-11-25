@@ -1,17 +1,26 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.endpaper 1.0
+import "Pages" as Pages
 
 Kirigami.ApplicationWindow {
     id: root
 
     title: "Endpaper"
-    width: Kirigami.Units.gridUnit * 50
-    height: Kirigami.Units.gridUnit * 40
+    width: Kirigami.Units.gridUnit * 55
+    height: Kirigami.Units.gridUnit * 42
     visible: true
+
+    function triggerPageOpen(idx) {
+        if (idx === 0) Bridge.pageOpened("kmail")
+        else if (idx === 1) Bridge.pageOpened("miniflux")
+    }
+
+    Component.onCompleted: {
+        triggerPageOpen(sidebar.currentIndex)
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -27,12 +36,12 @@ Kirigami.ApplicationWindow {
                 anchors.fill: parent
                 currentIndex: Bridge.lastPageIndex
                 model: ListModel {
-                    ListElement { name: "KMail Ingest"; iconName: "mail-folder-inbox"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/IngestPage.qml" }
-                    ListElement { name: "Miniflux Ingest"; iconName: "view-web-browser-dom-tree"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/MinifluxPage.qml" }
-                    ListElement { name: "RSS Ingest"; iconName: "rss-active"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/RssPage.qml" }
-                    ListElement { name: "Books"; iconName: "address-book-new"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/BooksPage.qml" }
-                    ListElement { name: "Build EPUB"; iconName: "run-build"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/BuildPage.qml" }
-                    ListElement { name: "Settings"; iconName: "settings-configure"; pageUri: "qrc:/org/kde/endpaper/src/qml/Pages/SettingsPage.qml" }
+                    ListElement { name: "KMail Ingest"; iconName: "mail-folder-inbox" }
+                    ListElement { name: "Miniflux Ingest"; iconName: "view-web-browser-dom-tree" }
+                    ListElement { name: "RSS Ingest"; iconName: "rss-active" }
+                    ListElement { name: "Books"; iconName: "address-book-new" }
+                    ListElement { name: "Build EPUB"; iconName: "run-build" }
+                    ListElement { name: "Settings"; iconName: "settings-configure" }
                 }
                 delegate: Controls.ItemDelegate {
                     width: ListView.view.width
@@ -41,7 +50,7 @@ Kirigami.ApplicationWindow {
                     highlighted: ListView.isCurrentItem
                     onClicked: {
                         Bridge.lastPageIndex = index
-                        stack.replace(model.pageUri, {}, Controls.StackView.Immediate)
+                        root.triggerPageOpen(index)
                     }
                 }
             }
@@ -52,11 +61,51 @@ Kirigami.ApplicationWindow {
             Layout.preferredWidth: 1
         }
 
-        Controls.StackView {
-            id: stack
+        ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            initialItem: sidebar.model.get(Bridge.lastPageIndex).pageUri
+            spacing: 0
+
+            Controls.ProgressBar {
+                Layout.fillWidth: true
+                indeterminate: true
+                visible: Bridge.isBusy
+            }
+
+            Kirigami.InlineMessage {
+                id: statusBanner
+                Layout.fillWidth: true
+                Layout.margins: visible ? Kirigami.Units.smallSpacing : 0
+                type: Bridge.statusIsError ? Kirigami.MessageType.Error : Kirigami.MessageType.Information
+                text: Bridge.statusMessage
+                visible: Bridge.statusMessage !== ""
+                showCloseButton: true
+                onVisibleChanged: {
+                    if (!visible && Bridge.statusMessage !== "") {
+                        Bridge.clearStatus()
+                    }
+                }
+                Connections {
+                    target: Bridge
+                    function onStatusMessageChanged() {
+                        statusBanner.visible = Bridge.statusMessage !== ""
+                    }
+                }
+            }
+
+            StackLayout {
+                id: stackLayout
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: sidebar.currentIndex
+
+                Pages.IngestPage {}
+                Pages.MinifluxPage {}
+                Pages.RssPage {}
+                Pages.BooksPage {}
+                Pages.BuildPage {}
+                Pages.SettingsPage {}
+            }
         }
     }
 }

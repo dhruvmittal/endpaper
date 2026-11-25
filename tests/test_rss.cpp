@@ -62,6 +62,30 @@ void test_rss_parsing() {
     std::cout << "PASS" << std::endl;
 }
 
+void test_atom_xhtml_content() {
+    std::cout << "  TEST: test_atom_xhtml_content... " << std::flush;
+
+    std::string atom_xml = R"(<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>XHTML Atom</title>
+  <entry>
+    <title>Structured Post</title>
+    <link rel="self" href="http://example.com/self.atom"/>
+    <link rel="alternate" href="http://example.com/post.html"/>
+    <author><name>Eve</name></author>
+    <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>XHTML body</p></div></content>
+  </entry>
+</feed>)";
+
+    auto items = RssFetcher::parse_xml(atom_xml);
+    assert(items.size() == 1);
+    assert(items[0].title == "Structured Post");
+    assert(items[0].link == "http://example.com/post.html");
+    assert(items[0].content_html.find("XHTML body") != std::string::npos);
+
+    std::cout << "PASS" << std::endl;
+}
+
 void test_rss_large_feed() {
     std::cout << "  TEST: test_rss_large_feed... " << std::flush;
     
@@ -92,7 +116,8 @@ void test_database_rss() {
         Database db(test_db);
         db.init();
 
-        db.add_rss_feed("My Feed", "http://example.com/feed");
+        assert(db.add_rss_feed("My Feed", "http://example.com/feed") == true);
+        assert(db.add_rss_feed("Duplicate Feed", "http://example.com/feed") == false);
         auto feeds = db.list_rss_feeds();
         assert(feeds.size() == 1);
         assert(feeds[0].title == "My Feed");
@@ -114,6 +139,7 @@ int main() {
 
     try {
         test_rss_parsing();
+        test_atom_xhtml_content();
         test_rss_large_feed();
         test_database_rss();
         std::cout << "\n✓ All RSS tests passed!" << std::endl;

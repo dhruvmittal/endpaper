@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "akonadi_fetcher.h"
@@ -15,6 +16,7 @@ struct Book {
     int64_t id;
     std::string title;
     std::string created_at;
+    int chapter_count = 0;
 };
 
 struct RssFeed {
@@ -57,15 +59,17 @@ public:
                      const std::string& content_html, int sort_order);
     [[nodiscard]] std::vector<Chapter> get_chapters(int64_t book_id);
     void update_sort_order(int64_t chapter_id, int new_order);
+    bool move_chapter(int64_t book_id, int64_t chapter_id, int delta);
     void delete_chapter(int64_t chapter_id);
     void delete_all_chapters(int64_t book_id);
     void reverse_chapter_order(int64_t book_id);
     void renumber_chapters(int64_t book_id);
     void auto_sort_chapters(int64_t book_id);
     [[nodiscard]] int max_sort_order(int64_t book_id);
+    [[nodiscard]] int chapter_count(int64_t book_id);
 
     // ── RSS operations ───────────────────────────────────────────────────
-    void add_rss_feed(const std::string& title, const std::string& url);
+    bool add_rss_feed(const std::string& title, const std::string& url);
     [[nodiscard]] std::vector<RssFeed> list_rss_feeds();
     void delete_rss_feed(int64_t feed_id);
 
@@ -78,6 +82,7 @@ public:
 
 private:
     void exec(const std::string& sql);
+    mutable std::recursive_mutex mu_;
     sqlite3* db_ = nullptr;
 };
 

@@ -1,6 +1,6 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Controls as Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.kirigamiaddons.formcard as FormCard
@@ -9,25 +9,83 @@ import org.kde.endpaper 1.0
 Kirigami.ScrollablePage {
     title: "Settings"
 
+    FolderDialog {
+        id: defaultFolderDialog
+        title: "Select Default Output Folder"
+        onAccepted: {
+            const p = decodeURIComponent(selectedFolder.toString().replace(/^file:\/\//, ""))
+            Bridge.defaultOutputFolder = p
+        }
+    }
+
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
         width: parent.width
 
         FormCard.FormHeader {
-            title: "General"
+            title: "Miniflux API"
         }
 
         FormCard.FormCard {
             FormCard.FormTextFieldDelegate {
-                id: authorField
+                label: "Server URL"
+                placeholderText: "https://miniflux.example.com"
+                text: Bridge.minifluxUrl
+                onEditingFinished: Bridge.minifluxUrl = text
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormPasswordFieldDelegate {
+                label: "API Token"
+                placeholderText: "Miniflux API token"
+                text: Bridge.minifluxToken
+                onEditingFinished: Bridge.minifluxToken = text
+            }
+        }
+
+        FormCard.FormHeader {
+            title: "General & Build Defaults"
+        }
+
+        FormCard.FormCard {
+            FormCard.FormTextFieldDelegate {
                 label: "Default Author"
-                text: "Unknown"
+                text: Bridge.defaultAuthor
+                onEditingFinished: Bridge.defaultAuthor = text
             }
             FormCard.FormDelegateSeparator {}
             FormCard.FormTextFieldDelegate {
-                id: publisherField
                 label: "Default Publisher"
-                text: "Endpaper"
+                text: Bridge.defaultPublisher
+                onEditingFinished: Bridge.defaultPublisher = text
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormTextFieldDelegate {
+                label: "Default Output Folder"
+                placeholderText: "Default (Documents)"
+                text: Bridge.defaultOutputFolder
+                onEditingFinished: Bridge.defaultOutputFolder = text
+            }
+            FormCard.FormButtonDelegate {
+                text: "Browse Default Folder..."
+                icon.name: "folder-open"
+                onClicked: defaultFolderDialog.open()
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormSwitchDelegate {
+                text: "Fuzzy Article Search"
+                description: "Match space-separated words anywhere; disable for regular expressions"
+                checked: Bridge.fuzzySearch
+                onToggled: Bridge.fuzzySearch = checked
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormTextFieldDelegate {
+                label: "RSS Max Articles (0 = unlimited)"
+                text: Bridge.rssMaxArticles.toString()
+                validator: IntValidator { bottom: 0; top: 10000 }
+                onEditingFinished: {
+                    const v = parseInt(text)
+                    if (!isNaN(v)) Bridge.rssMaxArticles = v
+                }
             }
         }
 
@@ -59,7 +117,7 @@ Kirigami.ScrollablePage {
             FormCard.FormDelegateSeparator {}
             FormCard.FormSwitchDelegate {
                 text: "Remember Last Application State"
-                description: "Restore previous focus, category, and filter selections on startup"
+                description: "Restore previous tab, folder, category, book, and filter selections on startup"
                 checked: Bridge.rememberState
                 onToggled: Bridge.rememberState = checked
             }
@@ -80,13 +138,21 @@ Kirigami.ScrollablePage {
             FormCard.FormTextFieldDelegate {
                 label: "Stub Threshold (characters)"
                 text: Bridge.stubThreshold.toString()
-                onAccepted: Bridge.stubThreshold = parseInt(text)
+                validator: IntValidator { bottom: 0; top: 1000000 }
+                onEditingFinished: {
+                    const v = parseInt(text)
+                    if (!isNaN(v)) Bridge.stubThreshold = v
+                }
             }
             FormCard.FormDelegateSeparator {}
             FormCard.FormTextFieldDelegate {
                 label: "Request Delay (ms)"
                 text: Bridge.requestDelayMs.toString()
-                onAccepted: Bridge.requestDelayMs = parseInt(text)
+                validator: IntValidator { bottom: 0; top: 60000 }
+                onEditingFinished: {
+                    const v = parseInt(text)
+                    if (!isNaN(v)) Bridge.requestDelayMs = v
+                }
             }
         }
 
@@ -95,13 +161,19 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormCard {
+            FormCard.FormTextDelegate {
+                text: "Akonadi Status"
+                description: Bridge.akonadiAvailable ? "Connected" : "Disconnected (start with: akonadictl start)"
+            }
             FormCard.FormButtonDelegate {
-                text: "Save Configuration"
-                icon.name: "document-save"
-                onClicked: {
-                    console.log("Saving configuration...")
-                    // Can be connected to Bridge if exposed, or just to show the UI
-                }
+                text: "Refresh Akonadi Status"
+                icon.name: "view-refresh"
+                onClicked: Bridge.refreshAkonadiStatus()
+            }
+            FormCard.FormDelegateSeparator {}
+            FormCard.FormTextDelegate {
+                text: "Configuration File"
+                description: Bridge.configFilePath
             }
         }
     }

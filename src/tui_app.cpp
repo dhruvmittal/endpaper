@@ -1,1498 +1,1593 @@
 #include "tui_app.h"
-#include "epub_builder.h"
-#include "html_sanitizer.h"
+#include "build_pipeline.h"
 
 #include <ftxui/component/component.hpp>
+#include <ftxui/component/component_options.hpp>
+#include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
-#include <ftxui/dom/table.hpp>
 
 #include <algorithm>
 #include <atomic>
-#include <filesystem>
-#include <future>
+#include <cctype>
+#include <climits>
+#include <functional>
 #include <mutex>
-#include <regex>
-#include <thread>
+#include <string>
+#include <utility>
+#include <vector>
 
-#include <curl/curl.h>
-#include <QImage>
-#include <QBuffer>
+using namespace ftxui;
 
 namespace endpaper {
 
-using namespace ftxui;
-namespace fs = std::filesystem;
+namespace {
 
-// ══════════════════════════════════════════════════════════════════════════
-// Helpers
-// ══════════════════════════════════════════════════════════════════════════
-
-static std::string slugify(const std::string& s) {
-    std::string result;
-    for (char c : s) {
-        if (std::isalnum(static_cast<unsigned char>(c))) {
-            result += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        } else if (std::isspace(static_cast<unsigned char>(c)) || c == '-' || c == '_') {
-            if (!result.empty() && result.back() != '-') {
-                result += '-';
-            }
-        }
-    }
-    while (!result.empty() && result.back() == '-') result.pop_back();
-    return result.empty() ? "book" : result;
+std::string trim_copy(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// TuiApp implementation
-// ══════════════════════════════════════════════════════════════════════════
+bool parse_non_negative_int(const std::string& raw, int& out) {
+    std::string s = trim_copy(raw);
+    if (s.empty()) return false;
+    for (unsigned char c : s) {
+        if (!std::isdigit(c)) return false;
+    }
+    try {
+        size_t pos = 0;
+        long long v = std::stoll(s, &pos, 10);
+        if (pos != s.size() || v < 0 || v > INT_MAX) return false;
+        out = static_cast<int>(v);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
-TuiApp::TuiApp(Config& config, Database& db, AkonadiFetcher& fetcher, RssFetcher& rss_fetcher, MinifluxFetcher& miniflux_fetcher, HtmlExtractor& html_extractor)
-    : config_(config), db_(db), fetcher_(fetcher), rss_fetcher_(rss_fetcher), miniflux_fetcher_(miniflux_fetcher), html_extractor_(html_extractor) {}
+struct SelectableArticle {
+    std::string title;
+    std::string author;
+    std::string date;
+    std::string url;
+    std::string html_body;
+    int64_t source_id = 0;
+    bool selected = false;
+};
+
+struct FilteredView {
+    std::vector<size_t> source_indices;
+    std::vector<std::string> labels;
+    int cursor = 0;
+};
+
+void rebuild_filtered_view(
+    const std::vector<SelectableArticle>& items,
+    const std::string& query,
+    bool fuzzy,
+    FilteredView& view)
+{
+    view.source_indices.clear();
+    view.labels.clear();
+
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (!matches_article_filter(items[i].title, items[i].author, query, fuzzy)) {
+            continue;
+        }
+        view.source_indices.push_back(i);
+        std::string line = items[i].selected ? "[x] " : "[ ] ";
+        line += items[i].title.empty() ? "(Untitled)" : items[i].title;
+        if (!items[i].author.empty()) line += " — " + items[i].author;
+        if (!items[i].date.empty()) line += " (" + items[i].date + ")";
+        view.labels.push_back(std::move(line));
+    }
+
+    if (view.labels.empty()) {
+        view.cursor = 0;
+    } else if (view.cursor >= static_cast<int>(view.labels.size())) {
+        view.cursor = static_cast<int>(view.labels.size()) - 1;
+    }
+}
+
+std::vector<MinifluxCategory> with_all_category(const std::vector<MinifluxCategory>& cats) {
+    std::vector<MinifluxCategory> out;
+    out.reserve(cats.size() + 1);
+    MinifluxCategory all{-1, "All Categories", 0};
+    for (const auto& c : cats) all.unread_count += c.unread_count;
+    out.push_back(std::move(all));
+    out.insert(out.end(), cats.begin(), cats.end());
+    return out;
+}
+
+} // namespace
+
+TuiApp::TuiApp(Config& config, Database& db, AkonadiFetcher& fetcher,
+               RssFetcher& rss_fetcher, MinifluxFetcher& miniflux_fetcher,
+               HtmlExtractor& html_extractor)
+    : config_(config)
+    , db_(db)
+    , fetcher_(fetcher)
+    , rss_fetcher_(rss_fetcher)
+    , miniflux_fetcher_(miniflux_fetcher)
+    , html_extractor_(html_extractor) {}
 
 void TuiApp::run() {
     auto screen = ScreenInteractive::Fullscreen();
 
-    // ── Shared state ─────────────────────────────────────────────────────
-    bool auto_fetch_akonadi = config_.get("behavior", "auto_fetch_akonadi", "false") == "true";
-    bool auto_fetch_miniflux = config_.get("behavior", "auto_fetch_miniflux", "false") == "true";
-    bool remember_config = config_.get("behavior", "remember_config", "false") == "true";
+    WorkerPool worker_pool;
+    std::atomic<bool> shutting_down{false};
+    auto run_on_ui = [&](std::function<void()> fn) {
+        if (shutting_down.load()) return;
+        screen.Post(std::move(fn));
+        screen.PostEvent(Event::Custom);
+    };
 
-    int active_tab = 0;
-    std::string last_kmail_folder;
-    std::string last_miniflux_category;
-    std::string last_build_book;
-    if (remember_config) {
-        try { active_tab = std::stoi(config_.get("state", "active_tab", "0")); } catch(...) {}
-        last_kmail_folder = config_.get("state", "last_kmail_folder", "");
-        last_miniflux_category = config_.get("state", "last_miniflux_category", "");
-        last_build_book = config_.get("state", "last_build_book", "");
-    }
-    
+    // ── Status & busy flags ──────────────────────────────────────────────
+    std::string status_msg = "Ready";
+    bool status_error = false;
+    bool loading_folders = false;
+    bool loading_emails = false;
+    bool loading_mf_cats = false;
+    bool loading_mf_entries = false;
+    bool loading_rss = false;
+    bool staging = false;
+    bool building = false;
+    std::string confirm_action;
+
+    auto set_status = [&](const std::string& msg, bool err = false) {
+        status_msg = msg;
+        status_error = err;
+    };
+    auto is_busy = [&]() {
+        return loading_folders || loading_emails || loading_mf_cats ||
+               loading_mf_entries || loading_rss || staging || building;
+    };
+
+    // ── Config-backed settings state ─────────────────────────────────────
+    bool auto_fetch_kmail = config_.get_bool("general", "auto_fetch_kmail", false);
+    bool auto_fetch_miniflux = config_.get_bool("general", "auto_fetch_miniflux", false);
+    bool cache_metadata = config_.get_bool("general", "cache_metadata", true);
+    bool remember_state = config_.get_bool("general", "remember_state", true);
+    bool fuzzy_search = config_.get_bool("ui", "fuzzy_search", true);
+
     bool enable_stub_resolving = config_.get_bool("fetching", "enable_stub_resolving", true);
-    std::string stub_threshold_text = std::to_string(config_.get_int("fetching", "stub_char_threshold", 1000));
-    std::string request_delay_text = std::to_string(config_.get_int("fetching", "request_delay_ms", 1000));
-    
-    std::string status_message;
-    std::mutex state_mutex;
+    std::string stub_threshold_text = std::to_string(
+        std::max(0, config_.get_int("fetching", "stub_char_threshold", 1000)));
+    std::string request_delay_text = std::to_string(
+        std::max(0, config_.get_int("fetching", "request_delay_ms", 1000)));
 
-    // ── KMail tab state ─────────────────────────────────────────────────
-    std::vector<FolderInfo> folders;
-    std::vector<std::string> folder_labels;
-    std::vector<EmailItem> emails;
-    std::vector<EmailItem> filtered_emails;
-    std::vector<std::string> email_labels;
-    std::vector<bool> email_selected;
-    int folder_selected = 0;
-    int email_focused = 0;
-    std::string filter_text;
-    std::atomic<bool> loading_folders{false};
-    std::atomic<bool> loading_emails{false};
+    std::string mf_url_str = config_.get("miniflux", "url", "");
+    std::string mf_token_str = config_.get("miniflux", "token", "");
+    miniflux_fetcher_.set_credentials(mf_url_str, mf_token_str);
 
-    // ── Miniflux tab state ───────────────────────────────────────────────
-    std::vector<MinifluxCategory> miniflux_categories;
-    std::vector<std::string> miniflux_category_labels;
-    std::vector<MinifluxEntry> miniflux_entries;
-    std::vector<MinifluxEntry> filtered_miniflux;
-    std::vector<std::string> miniflux_entry_labels;
-    std::vector<bool> miniflux_selected;
-    int miniflux_category_selected = 0;
-    int miniflux_entry_focused = 0;
-    int miniflux_status_filter = 0; // 0=Unread, 1=Starred, 2=All
-    if (remember_config) {
-        try { miniflux_status_filter = std::stoi(config_.get("state", "last_miniflux_filter", "0")); } catch(...) {}
-    }
-    std::string miniflux_filter_text;
-    std::string miniflux_server_url = config_.get("miniflux", "url", "");
-    std::string miniflux_token = config_.get("miniflux", "token", "");
-    std::atomic<bool> loading_miniflux_categories{false};
-    std::atomic<bool> loading_miniflux_entries{false};
-    
-    // Set initial credentials
-    miniflux_fetcher_.set_credentials(miniflux_server_url, miniflux_token);
+    std::string epub_author = config_.get("epub", "author", "Unknown");
+    std::string epub_publisher = config_.get("epub", "publisher", "Endpaper");
+    std::string default_folder = config_.get("general", "default_folder", "");
+    std::string rss_max_articles_text = std::to_string(
+        std::max(0, config_.get_int("rss", "max_articles", 50)));
 
-    // ── RSS tab state ────────────────────────────────────────────────────
-    std::vector<RssFeed> rss_feeds;
-    std::vector<std::string> feed_labels;
-    std::vector<RssItem> rss_articles;
-    std::vector<RssItem> filtered_rss;
-    std::vector<std::string> rss_article_labels;
-    std::vector<bool> rss_selected;
-    int feed_selected = 0;
-    int rss_article_focused = 0;
-    std::string rss_filter_text;
-    std::string rss_max_articles = config_.get("rss", "max_articles", "50");
-    std::string new_feed_url;
-    std::string new_feed_title;
-    std::atomic<bool> loading_rss{false};
-    std::atomic<bool> loading_feeds{false};
+    bool simplify_html_opt = config_.get_bool("epub", "simplify", true);
+    bool keep_images_opt = config_.get_bool("epub", "keep_images", false);
+    bool append_mode = false; // Session-only so rebuilds don't silently duplicate chapters
 
-    // Book selector for staging
+    bool akonadi_available = fetcher_.is_available();
+
+    // ── Persisted navigation/selection state ─────────────────────────────
+    int tab_index = remember_state
+        ? std::clamp(config_.get_int("state", "last_page_index", 0), 0, 5)
+        : 0;
+    int main_sel_main = 0; // 0 = top tab bar, 1 = tab body
+
+    int64_t selected_book_id = remember_state
+        ? config_.get_int64("general", "selected_book_id", -1)
+        : -1;
+    int64_t last_kmail_col_id = remember_state
+        ? config_.get_int64("state", "last_kmail_collection_id", -1)
+        : -1;
+    int64_t last_mf_cat_id = remember_state
+        ? config_.get_int64("state", "last_miniflux_category_id", -1)
+        : -1;
+    int mf_status_idx = remember_state
+        ? std::clamp(config_.get_int("state", "last_miniflux_status_filter", 0), 0, 2)
+        : 0;
+    int64_t last_rss_feed_id = remember_state
+        ? config_.get_int64("state", "last_rss_feed_id", -1)
+        : -1;
+
+    auto persist_state = [&](const std::string& sec, const std::string& key, const std::string& val) {
+        if (!remember_state) return;
+        config_.set(sec, key, val);
+        config_.save();
+    };
+
+    // ── Track text inputs so single-letter shortcuts never steal typing ──
+    std::vector<Component> text_inputs;
+    auto make_input = [&](std::string* content, std::string placeholder = "",
+                          bool password = false, std::function<void()> on_change = {}) {
+        InputOption opt;
+        opt.multiline = false;
+        opt.password = password;
+        if (on_change) opt.on_change = std::move(on_change);
+        auto comp = Input(content, std::move(placeholder), std::move(opt));
+        text_inputs.push_back(comp);
+        return comp;
+    };
+    auto any_input_focused = [&]() {
+        for (const auto& inp : text_inputs) {
+            if (inp->Focused()) return true;
+        }
+        return false;
+    };
+
+    // ── Books & Chapters state ───────────────────────────────────────────
     std::vector<Book> books;
     std::vector<std::string> book_labels;
-    int book_selected = 0;
+    int selected_book_idx = 0;
+
     std::vector<Chapter> chapters;
     std::vector<std::string> chapter_labels;
-    int chapter_selected = 0;
+    int selected_chapter_idx = 0;
+
     std::string new_book_title;
-
-    // ── Build tab state ──────────────────────────────────────────────────
-    int build_book_selected = 0;
-    std::vector<std::string> build_book_labels;
     std::string epub_output_path;
-    std::string epub_author;
-    std::string epub_publisher;
-    std::atomic<bool> building{false};
-    std::string build_status;
-    bool append_mode = false;
-    bool simplify_mode = false;
-    bool keep_images_mode = false;
-    bool fuzzy_search = config_.get("ui", "fuzzy_search", "false") == "true";
+    bool custom_output_path_edited = false;
 
-    // ── Shared Helpers ───────────────────────────────────────────────────
-
-    auto sync_book_labels = [&]() {
-        book_labels.clear();
+    auto current_book_title = [&]() -> std::string {
         for (const auto& b : books) {
-            book_labels.push_back(b.title + " (" + b.created_at + ")");
+            if (b.id == selected_book_id) return b.title;
         }
-        if (book_selected >= static_cast<int>(book_labels.size()))
-            book_selected = std::max(0, static_cast<int>(book_labels.size()) - 1);
-
-        build_book_labels.clear();
-        for (const auto& b : books) {
-            auto ch_count = db_.get_chapters(b.id).size();
-            build_book_labels.push_back(b.title + " [" + std::to_string(ch_count) + " ch]");
-        }
-        if (build_book_selected >= static_cast<int>(build_book_labels.size()))
-            build_book_selected = 0;
+        return "";
     };
 
-    auto sync_chapter_labels = [&]() {
-        chapter_labels.clear();
-        for (const auto& c : chapters) {
-            chapter_labels.push_back(std::to_string(c.sort_order) + ". " + c.subject + " — " + c.sender);
-        }
-        if (chapter_selected >= static_cast<int>(chapter_labels.size()))
-            chapter_selected = std::max(0, static_cast<int>(chapter_labels.size()) - 1);
-    };
-
-    auto refresh_books = [&]() {
-        books = db_.list_books();
-        sync_book_labels();
-    };
-
-    auto update_epub_path = [&]() {
-        if (!books.empty() && build_book_selected >= 0 && build_book_selected < static_cast<int>(books.size())) {
-            epub_output_path = "~/Documents/" + slugify(books[build_book_selected].title) + ".epub";
+    auto update_epub_path = [&](bool force) {
+        if (!force && custom_output_path_edited) return;
+        std::string title = current_book_title();
+        if (title.empty()) {
+            epub_output_path.clear();
+        } else {
+            epub_output_path = resolve_epub_output_path(title, "", trim_copy(default_folder));
         }
     };
 
     auto refresh_chapters = [&]() {
-        if (!books.empty() && book_selected >= 0 && book_selected < static_cast<int>(books.size())) {
-            chapters = db_.get_chapters(books[book_selected].id);
-        } else {
-            chapters.clear();
+        chapters.clear();
+        chapter_labels.clear();
+        selected_chapter_idx = 0;
+        if (selected_book_id == -1) return;
+
+        chapters = db_.get_chapters(selected_book_id);
+        for (size_t i = 0; i < chapters.size(); ++i) {
+            std::string label = std::to_string(i + 1) + ". " + chapters[i].subject;
+            if (!chapters[i].sender.empty()) label += " — " + chapters[i].sender;
+            chapter_labels.push_back(std::move(label));
         }
-        sync_chapter_labels();
     };
 
-    // ── KMail Helpers ───────────────────────────────────────────────────
-
-    auto sync_folder_labels = [&]() {
-        folder_labels.clear();
-        for (const auto& f : folders) {
-            folder_labels.push_back(f.full_path);
-        }
-        if (folder_selected >= static_cast<int>(folder_labels.size()))
-            folder_selected = std::max(0, static_cast<int>(folder_labels.size()) - 1);
-    };
-
-    auto apply_email_filter = [&]() {
-        filtered_emails.clear();
-        email_labels.clear();
-
-        std::regex re;
-        bool use_filter = !filter_text.empty();
-        std::vector<std::string> fuzzy_words;
-
-        if (use_filter) {
-            if (fuzzy_search) {
-                std::istringstream iss(filter_text);
-                std::string w;
-                while (iss >> w) {
-                    std::transform(w.begin(), w.end(), w.begin(), ::tolower);
-                    fuzzy_words.push_back(w);
-                }
-            } else {
-                try { re = std::regex(filter_text, std::regex::icase); }
-                catch (...) { use_filter = false; }
-            }
-        }
-
-        for (size_t i = 0; i < emails.size(); ++i) {
-            if (use_filter) {
-                std::string haystack_lower = emails[i].subject + " " + emails[i].sender;
-                std::transform(haystack_lower.begin(), haystack_lower.end(), haystack_lower.begin(), ::tolower);
-                if (fuzzy_search) {
-                    bool match = true;
-                    for (const auto& w : fuzzy_words) {
-                        if (haystack_lower.find(w) == std::string::npos) { match = false; break; }
-                    }
-                    if (!match) continue;
-                } else {
-                    if (!std::regex_search(emails[i].subject, re) && !std::regex_search(emails[i].sender, re)) continue;
-                }
-            }
-            bool selected = (i < email_selected.size() && email_selected[i]);
-            email_labels.push_back((selected ? "◉ " : "○ ") + emails[i].subject + " | " + emails[i].sender);
-            filtered_emails.push_back(emails[i]);
-        }
-        if (email_focused >= static_cast<int>(email_labels.size()))
-            email_focused = std::max(0, static_cast<int>(email_labels.size()) - 1);
-    };
-
-    // ── Miniflux Helpers ────────────────────────────────────────────────
-
-    auto sync_miniflux_category_labels = [&]() {
-        miniflux_category_labels.clear();
-        miniflux_category_labels.push_back("All Categories");
-        for (const auto& cat : miniflux_categories) {
-            miniflux_category_labels.push_back(cat.title + " (" + std::to_string(cat.unread_count) + ")");
-        }
-        if (miniflux_category_selected >= static_cast<int>(miniflux_category_labels.size()))
-            miniflux_category_selected = 0;
-    };
-
-    auto apply_miniflux_filter = [&]() {
-        filtered_miniflux.clear();
-        miniflux_entry_labels.clear();
-
-        std::regex re;
-        bool use_filter = !miniflux_filter_text.empty();
-        std::vector<std::string> fuzzy_words;
-
-        if (use_filter) {
-            if (fuzzy_search) {
-                std::istringstream iss(miniflux_filter_text);
-                std::string w;
-                while (iss >> w) {
-                    std::transform(w.begin(), w.end(), w.begin(), ::tolower);
-                    fuzzy_words.push_back(w);
-                }
-            } else {
-                try { re = std::regex(miniflux_filter_text, std::regex::icase); }
-                catch (...) { use_filter = false; }
-            }
-        }
-
-        for (size_t i = 0; i < miniflux_entries.size(); ++i) {
-            if (use_filter) {
-                std::string haystack_lower = miniflux_entries[i].title + " " + miniflux_entries[i].author;
-                std::transform(haystack_lower.begin(), haystack_lower.end(), haystack_lower.begin(), ::tolower);
-                if (fuzzy_search) {
-                    bool match = true;
-                    for (const auto& w : fuzzy_words) {
-                        if (haystack_lower.find(w) == std::string::npos) { match = false; break; }
-                    }
-                    if (!match) continue;
-                } else {
-                    if (!std::regex_search(miniflux_entries[i].title, re) && !std::regex_search(miniflux_entries[i].author, re)) continue;
-                }
-            }
-            bool selected = (i < miniflux_selected.size() && miniflux_selected[i]);
-            miniflux_entry_labels.push_back((selected ? "◉ " : "○ ") + miniflux_entries[i].title + " | " + miniflux_entries[i].author);
-            filtered_miniflux.push_back(miniflux_entries[i]);
-        }
-        if (miniflux_entry_focused >= static_cast<int>(miniflux_entry_labels.size()))
-            miniflux_entry_focused = std::max(0, static_cast<int>(miniflux_entry_labels.size()) - 1);
-    };
-
-    // ── RSS Helpers ─────────────────────────────────────────────────────
-
-    auto sync_rss_labels = [&]() {
-        feed_labels.clear();
-        for (const auto& f : rss_feeds) {
-            feed_labels.push_back(f.title + " (" + f.url + ")");
-        }
-        if (feed_selected >= static_cast<int>(feed_labels.size()))
-            feed_selected = std::max(0, static_cast<int>(feed_labels.size()) - 1);
-    };
-
-    auto apply_rss_filter = [&]() {
-        filtered_rss.clear();
-        rss_article_labels.clear();
-        std::regex re;
-        bool use_filter = !rss_filter_text.empty();
-        std::vector<std::string> fuzzy_words;
-
-        if (use_filter) {
-            if (fuzzy_search) {
-                std::istringstream iss(rss_filter_text);
-                std::string w;
-                while (iss >> w) {
-                    std::transform(w.begin(), w.end(), w.begin(), ::tolower);
-                    fuzzy_words.push_back(w);
-                }
-            } else {
-                try { re = std::regex(rss_filter_text, std::regex::icase); }
-                catch (...) { use_filter = false; }
-            }
-        }
-
-        for (size_t i = 0; i < rss_articles.size(); ++i) {
-            if (use_filter) {
-                std::string haystack_lower = rss_articles[i].title + " " + rss_articles[i].author;
-                std::transform(haystack_lower.begin(), haystack_lower.end(), haystack_lower.begin(), ::tolower);
-                if (fuzzy_search) {
-                    bool match = true;
-                    for (const auto& w : fuzzy_words) {
-                        if (haystack_lower.find(w) == std::string::npos) { match = false; break; }
-                    }
-                    if (!match) continue;
-                } else {
-                    if (!std::regex_search(rss_articles[i].title, re) && !std::regex_search(rss_articles[i].author, re)) continue;
-                }
-            }
-            bool selected = (i < rss_selected.size() && rss_selected[i]);
-            rss_article_labels.push_back((selected ? "◉ " : "○ ") + rss_articles[i].title + " | " + rss_articles[i].author);
-            filtered_rss.push_back(rss_articles[i]);
-        }
-        if (rss_article_focused >= static_cast<int>(rss_article_labels.size()))
-            rss_article_focused = std::max(0, static_cast<int>(rss_article_labels.size()) - 1);
-    };
-
-    // Initial load
-    refresh_books();
-    refresh_chapters();
-    rss_feeds = db_.list_rss_feeds();
-    sync_rss_labels();
-    epub_author = config_.get("epub", "author", "Unknown");
-    epub_publisher = config_.get("epub", "publisher", "Endpaper");
-    if (!books.empty()) {
-        if (remember_config && !last_build_book.empty()) {
-            for (size_t i = 0; i < books.size(); ++i) {
-                if (books[i].title == last_build_book) { build_book_selected = i; break; }
-            }
-        }
-        epub_output_path = "~/Documents/" + slugify(books[build_book_selected].title) + ".epub";
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  TAB 0: KMAIL
-    // ══════════════════════════════════════════════════════════════════════
-
-    auto folder_menu = Menu(&folder_labels, &folder_selected);
-    auto email_menu_option = MenuOption::Vertical();
-    email_menu_option.entries_option.transform = [&](EntryState resp) {
-        auto e = text(resp.label);
-        if (resp.label.substr(0, 3) == "◉ ") e = e | color(Color::Green) | bold;
-        if (resp.focused) e = e | inverted;
-        return e;
-    };
-    auto email_menu = Menu(&email_labels, &email_focused, email_menu_option);
-
-    auto do_fetch_folders = [&] {
-        if (loading_folders) return;
-        loading_folders = true;
-        status_message = "Fetching folders from Akonadi...";
-        auto fut = fetcher_.fetch_folders();
-        std::thread([&, fut = std::move(fut)]() mutable {
-            try {
-                auto result = fut.get();
-                std::lock_guard lock(state_mutex);
-                folders = std::move(result);
-                folder_selected = 0;
-                if (remember_config && !last_kmail_folder.empty()) {
-                    for (size_t i = 0; i < folders.size(); ++i) {
-                        if (folders[i].full_path == last_kmail_folder) { folder_selected = i; break; }
-                    }
-                }
-                sync_folder_labels();
-                status_message = "Loaded " + std::to_string(folders.size()) + " folders";
-            } catch (const std::exception& e) {
-                status_message = std::string("Error: ") + e.what();
-            }
-            loading_folders = false;
-            screen.Post(Event::Custom);
-        }).detach();
-    };
-    auto btn_fetch_folders = Button("⟳ Fetch Folders", do_fetch_folders);
-
-    auto btn_fetch_emails = Button("📧 Fetch Emails", [&] {
-        if (loading_emails || folders.empty()) return;
-        loading_emails = true;
-        int64_t col_id = folders[folder_selected].collection_id;
-        status_message = "Fetching emails...";
-        auto fut = fetcher_.fetch_emails(col_id);
-        std::thread([&, fut = std::move(fut)]() mutable {
-            try {
-                auto result = fut.get();
-                std::lock_guard lock(state_mutex);
-                emails = std::move(result);
-                email_selected.assign(emails.size(), false);
-                email_focused = 0;
-                apply_email_filter();
-                status_message = "Loaded " + std::to_string(emails.size()) + " emails";
-            } catch (const std::exception& e) {
-                status_message = std::string("Error: ") + e.what();
-            }
-            loading_emails = false;
-            screen.Post(Event::Custom);
-        }).detach();
-    });
-
-    auto btn_stage_kmail = Button("✓ Stage Selected", [&] {
-        if (books.empty()) { status_message = "Create a book first in the Books tab!"; return; }
-        int64_t book_id = books[build_book_selected].id;
-        int base_order = db_.max_sort_order(book_id);
-        int staged = 0;
-        for (size_t i = 0; i < emails.size(); ++i) {
-            if (email_selected[i]) {
-                db_.add_chapter(book_id, emails[i].subject, emails[i].sender, sanitize_html(emails[i].html_body, true), base_order + staged + 1);
-                staged++;
-            }
-        }
-        status_message = "Staged " + std::to_string(staged) + " emails";
-        email_selected.assign(emails.size(), false);
-        apply_email_filter();
-        db_.renumber_chapters(book_id);
-        refresh_chapters();
-    });
-
-    auto btn_kmail_select_all = Button("☑ All", [&] {
-        for (const auto& fe : filtered_emails) {
-            for (size_t i = 0; i < emails.size(); ++i) {
-                if (emails[i].akonadi_id == fe.akonadi_id) { email_selected[i] = true; break; }
-            }
-        }
-        apply_email_filter();
-    });
-
-    auto btn_kmail_deselect_all = Button("☐ None", [&] {
-        email_selected.assign(emails.size(), false);
-        apply_email_filter();
-    });
-
-    auto input_kmail_filter = Input(&filter_text, "Filter...");
-    auto kmail_filter_wrapper = CatchEvent(input_kmail_filter, [&](Event e) {
-        if (input_kmail_filter->OnEvent(e)) { apply_email_filter(); return true; }
-        return false;
-    });
-
-    auto email_toggle = CatchEvent(email_menu, [&](Event event) {
-        if ((event == Event::Character(' ') || event == Event::Return) && !filtered_emails.empty() && email_focused >= 0 && email_focused < (int)filtered_emails.size()) {
-            int64_t tid = filtered_emails[email_focused].akonadi_id;
-            for (size_t i = 0; i < emails.size(); ++i) { if (emails[i].akonadi_id == tid) { email_selected[i] = !email_selected[i]; break; } }
-            apply_email_filter();
-            return true;
-        }
-        return false;
-    });
-
-    DropdownOption kmail_book_opt;
-    kmail_book_opt.radiobox.entries = &build_book_labels;
-    kmail_book_opt.radiobox.selected = &build_book_selected;
-    kmail_book_opt.radiobox.on_change = [&] { update_epub_path(); };
-    auto kmail_book_dropdown = Dropdown(kmail_book_opt);
-
-    int kmail_sel1 = 0;
-    int kmail_sel2 = 0;
-    int kmail_sel_main = 0;
-    Components kmail_row1;
-    kmail_row1.push_back(btn_fetch_folders);
-    kmail_row1.push_back(btn_fetch_emails);
-    kmail_row1.push_back(kmail_filter_wrapper);
-
-    Components kmail_row2;
-    kmail_row2.push_back(btn_kmail_select_all);
-    kmail_row2.push_back(btn_kmail_deselect_all);
-    kmail_row2.push_back(btn_stage_kmail);
-    kmail_row2.push_back(kmail_book_dropdown);
-
-    Components kmail_main;
-    kmail_main.push_back(Container::Horizontal(kmail_row1, &kmail_sel1));
-    kmail_main.push_back(folder_menu);
-    kmail_main.push_back(Container::Horizontal(kmail_row2, &kmail_sel2));
-    kmail_main.push_back(email_toggle);
-    auto kmail_tab = Container::Vertical(kmail_main, &kmail_sel_main);
-
-    auto kmail_renderer = Renderer(kmail_tab, [&] {
-        int kmail_sel_count = 0;
-        for (bool s : email_selected) if (s) kmail_sel_count++;
-
-        Elements cols;
-        cols.push_back(btn_fetch_folders->Render());
-        cols.push_back(text(" "));
-        cols.push_back(btn_fetch_emails->Render());
-        cols.push_back(text("  Filter: "));
-        cols.push_back(kmail_filter_wrapper->Render() | flex);
-
-        Elements foot;
-        foot.push_back(btn_kmail_select_all->Render());
-        foot.push_back(btn_kmail_deselect_all->Render());
-        foot.push_back(btn_stage_kmail->Render());
-        foot.push_back(text(" (" + std::to_string(kmail_sel_count) + ")") | bold);
-        foot.push_back(text("  → Book: "));
-        foot.push_back(kmail_book_dropdown->Render());
-
-        Elements rows;
-        rows.push_back(text("📧 KMAIL INGEST") | bold | center);
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(cols)));
-        rows.push_back(separator());
-        rows.push_back(text("Folders:") | bold);
-        rows.push_back(folder_menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 6) | border);
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(foot)));
-        rows.push_back(separator());
-        rows.push_back(email_toggle->Render() | vscroll_indicator | frame | flex | border);
-        if (loading_emails.load()) rows.push_back(text("⏳ Loading...") | blink | center);
-
-        return vbox(std::move(rows));
-    });
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  TAB 1: MINIFLUX
-    // ══════════════════════════════════════════════════════════════════════
-
-    auto miniflux_category_menu = Menu(&miniflux_category_labels, &miniflux_category_selected);
-    auto miniflux_entry_option = MenuOption::Vertical();
-    miniflux_entry_option.entries_option.transform = [&](EntryState resp) {
-        auto e = text(resp.label);
-        if (resp.label.substr(0, 3) == "◉ ") e = e | color(Color::Cyan) | bold;
-        if (resp.focused) e = e | inverted;
-        return e;
-    };
-    auto miniflux_entry_menu = Menu(&miniflux_entry_labels, &miniflux_entry_focused, miniflux_entry_option);
-
-    auto do_fetch_mini_cats = [&] {
-        if (miniflux_server_url.empty()) { status_message = "Set Miniflux URL in Settings!"; return; }
-        loading_miniflux_categories = true;
-        auto fut = miniflux_fetcher_.fetch_categories();
-        std::thread([&, fut = std::move(fut)]() mutable {
-            try {
-                auto res = fut.get();
-                std::lock_guard lock(state_mutex);
-                miniflux_categories = std::move(res);
-                if (remember_config && !last_miniflux_category.empty()) {
-                    for (size_t i = 0; i < miniflux_categories.size(); ++i) {
-                        if (miniflux_categories[i].title == last_miniflux_category) {
-                            miniflux_category_selected = i + 1; break;
-                        }
-                    }
-                }
-                sync_miniflux_category_labels();
-                status_message = "Loaded " + std::to_string(miniflux_categories.size()) + " categories";
-            } catch (const std::exception& e) { status_message = e.what(); }
-            loading_miniflux_categories = false;
-            screen.Post(Event::Custom);
-        }).detach();
-    };
-    auto btn_fetch_mini_cats = Button("⟳ Fetch Categories", do_fetch_mini_cats);
-
-    auto btn_fetch_mini_entries = Button("🌀 Fetch Entries", [&] {
-        if (loading_miniflux_entries) return;
-        loading_miniflux_entries = true;
-        MinifluxFetcher::FetchParams p;
-        if (miniflux_category_selected > 0) p.category_id = miniflux_categories[miniflux_category_selected - 1].id;
-        if (miniflux_status_filter == 0) p.status = "unread";
-        else if (miniflux_status_filter == 1) p.starred = true;
-
-        status_message = "Fetching entries...";
-        auto fut = miniflux_fetcher_.fetch_entries(p);
-        std::thread([&, fut = std::move(fut)]() mutable {
-            try {
-                auto res = fut.get();
-                std::lock_guard lock(state_mutex);
-                miniflux_entries = std::move(res);
-                miniflux_selected.assign(miniflux_entries.size(), false);
-                miniflux_entry_focused = 0;
-                apply_miniflux_filter();
-                status_message = "Loaded " + std::to_string(miniflux_entries.size()) + " entries";
-            } catch (const std::exception& e) { status_message = e.what(); }
-            loading_miniflux_entries = false;
-            screen.Post(Event::Custom);
-        }).detach();
-    });
-
-    auto filter_labels_mini = std::vector<std::string>{"Unread", "Starred", "All"};
-    auto filter_toggle_mini = Toggle(&filter_labels_mini, &miniflux_status_filter);
-
-    auto btn_stage_mini = Button("✓ Stage Selected", [&] {
-        if (books.empty()) { status_message = "Create a book first!"; return; }
-        if (loading_miniflux_entries) return;
-        
-        std::vector<MinifluxEntry> selected_entries;
-        for (size_t i = 0; i < miniflux_entries.size(); ++i) {
-            if (miniflux_selected[i]) selected_entries.push_back(miniflux_entries[i]);
-        }
-        if (selected_entries.empty()) return;
-
-        loading_miniflux_entries = true;
-        int64_t book_id = books[build_book_selected].id;
-        status_message = "Staging (fetching full content)...";
-
-        std::thread([&, selected_entries = std::move(selected_entries), book_id]() {
-            int base_order = db_.max_sort_order(book_id);
-            int staged = 0;
-
-            bool resolve_stubs = config_.get_bool("fetching", "enable_stub_resolving", true);
-            size_t threshold = config_.get_int("fetching", "stub_char_threshold", 1000);
-            int delay_ms = config_.get_int("fetching", "request_delay_ms", 1000);
-
-            for (const auto& ent : selected_entries) {
-                std::string content = ent.content;
-                if (resolve_stubs && content.size() < threshold) {
-                    {
-                        std::lock_guard lock(state_mutex);
-                        status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_entries.size()) + "]: Resolving stub for " + ent.title;
-                    }
-                    screen.Post(Event::Custom);
-
-                    if (staged > 0 && delay_ms > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-                    }
-
-                    try {
-                        auto fut = miniflux_fetcher_.fetch_original_content(ent.id);
-                        std::string full_content = fut.get();
-                        if (!full_content.empty()) content = full_content;
-                    } catch (...) {}
-                } else {
-                    std::lock_guard lock(state_mutex);
-                    status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_entries.size()) + "]: " + ent.title;
-                    screen.Post(Event::Custom);
-                }
-
-                {
-                    std::lock_guard lock(state_mutex);
-                    db_.add_chapter(book_id, ent.title, ent.author, sanitize_html(content, true), base_order + staged + 1);
-                    staged++;
-                }
-            }
-            {
-                std::lock_guard lock(state_mutex);
-                status_message = "✓ Staged " + std::to_string(staged) + " entries";
-                miniflux_selected.assign(miniflux_entries.size(), false);
-                loading_miniflux_entries = false;
-                apply_miniflux_filter();
-                db_.renumber_chapters(book_id);
-                refresh_chapters();
-            }
-            screen.Post(Event::Custom);
-        }).detach();
-    });
-
-    auto btn_mini_select_all = Button("☑ All", [&] {
-        for (const auto& fe : filtered_miniflux) {
-            for (size_t i = 0; i < miniflux_entries.size(); ++i) {
-                if (miniflux_entries[i].id == fe.id) { miniflux_selected[i] = true; break; }
-            }
-        }
-        apply_miniflux_filter();
-    });
-
-    auto btn_mini_deselect_all = Button("☐ None", [&] {
-        miniflux_selected.assign(miniflux_entries.size(), false);
-        apply_miniflux_filter();
-    });
-
-    auto input_mini_filter = Input(&miniflux_filter_text, "Search...");
-    auto mini_filter_wrapper = CatchEvent(input_mini_filter, [&](Event e) {
-        if (input_mini_filter->OnEvent(e)) { apply_miniflux_filter(); return true; }
-        return false;
-    });
-
-    auto mini_entry_toggle = CatchEvent(miniflux_entry_menu, [&](Event event) {
-        if ((event == Event::Character(' ') || event == Event::Return) && !filtered_miniflux.empty() && miniflux_entry_focused >= 0 && miniflux_entry_focused < (int)filtered_miniflux.size()) {
-            int64_t tid = filtered_miniflux[miniflux_entry_focused].id;
-            for (size_t i = 0; i < miniflux_entries.size(); ++i) { if (miniflux_entries[i].id == tid) { miniflux_selected[i] = !miniflux_selected[i]; break; } }
-            apply_miniflux_filter();
-            return true;
-        }
-        return false;
-    });
-
-    DropdownOption miniflux_book_opt;
-    miniflux_book_opt.radiobox.entries = &build_book_labels;
-    miniflux_book_opt.radiobox.selected = &build_book_selected;
-    miniflux_book_opt.radiobox.on_change = [&] { update_epub_path(); };
-    auto miniflux_book_dropdown = Dropdown(miniflux_book_opt);
-
-    int mini_sel1 = 0;
-    int mini_sel2 = 0;
-    int mini_sel_main = 0;
-    Components mini_row1;
-    mini_row1.push_back(btn_fetch_mini_cats);
-    mini_row1.push_back(btn_fetch_mini_entries);
-    mini_row1.push_back(filter_toggle_mini);
-    mini_row1.push_back(mini_filter_wrapper);
-
-    Components mini_row2;
-    mini_row2.push_back(btn_mini_select_all);
-    mini_row2.push_back(btn_mini_deselect_all);
-    mini_row2.push_back(btn_stage_mini);
-    mini_row2.push_back(miniflux_book_dropdown);
-
-    Components mini_main;
-    mini_main.push_back(Container::Horizontal(mini_row1, &mini_sel1));
-    mini_main.push_back(miniflux_category_menu);
-    mini_main.push_back(Container::Horizontal(mini_row2, &mini_sel2));
-    mini_main.push_back(mini_entry_toggle);
-    auto miniflux_tab = Container::Vertical(mini_main, &mini_sel_main);
-
-    auto miniflux_renderer = Renderer(miniflux_tab, [&] {
-        int mini_sel_count = 0;
-        for (bool s : miniflux_selected) if (s) mini_sel_count++;
-
-        Elements head;
-        head.push_back(btn_fetch_mini_cats->Render());
-        head.push_back(text(" "));
-        head.push_back(btn_fetch_mini_entries->Render());
-        head.push_back(separator());
-        head.push_back(filter_toggle_mini->Render());
-        head.push_back(text("  Search: "));
-        head.push_back(mini_filter_wrapper->Render() | flex);
-
-        Elements foot;
-        foot.push_back(btn_mini_select_all->Render());
-        foot.push_back(btn_mini_deselect_all->Render());
-        foot.push_back(btn_stage_mini->Render());
-        foot.push_back(text(" (" + std::to_string(mini_sel_count) + ")") | bold);
-        foot.push_back(text("  → Book: "));
-        foot.push_back(miniflux_book_dropdown->Render());
-
-        Elements rows;
-        rows.push_back(text("🌀 MINIFLUX INGEST") | bold | center);
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(head)));
-        rows.push_back(separator());
-        rows.push_back(text("Categories:") | bold);
-        rows.push_back(miniflux_category_menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 6) | border);
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(foot)));
-        rows.push_back(separator());
-        rows.push_back(mini_entry_toggle->Render() | vscroll_indicator | frame | flex | border);
-        if (loading_miniflux_entries.load()) rows.push_back(text("⏳ Loading...") | blink | center);
-
-        return vbox(std::move(rows));
-    });
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  TAB 2: RSS
-    // ══════════════════════════════════════════════════════════════════════
-
-    auto rss_feed_menu = Menu(&feed_labels, &feed_selected);
-    auto rss_article_menu_option = MenuOption::Vertical();
-    rss_article_menu_option.entries_option.transform = [&](EntryState resp) {
-        auto e = text(resp.label);
-        if (resp.label.substr(0, 3) == "◉ ") e = e | color(Color::Green) | bold;
-        if (resp.focused) e = e | inverted;
-        return e;
-    };
-    auto rss_article_menu = Menu(&rss_article_labels, &rss_article_focused, rss_article_menu_option);
-
-    auto btn_add_rss_feed = Button("+ Add Feed", [&] {
-        if (new_feed_url.empty() || new_feed_title.empty()) return;
-        try { db_.add_rss_feed(new_feed_title, new_feed_url); new_feed_url.clear(); new_feed_title.clear(); rss_feeds = db_.list_rss_feeds(); sync_rss_labels(); status_message = "Feed added!"; }
-        catch (const std::exception& e) { status_message = e.what(); }
-    });
-
-    auto btn_remove_rss_feed = Button("🗑 Remove", [&] {
-        if (rss_feeds.empty()) return;
-        db_.delete_rss_feed(rss_feeds[feed_selected].id);
-        rss_feeds = db_.list_rss_feeds(); sync_rss_labels(); status_message = "Feed removed";
-    });
-
-    auto btn_fetch_rss = Button("🌐 Fetch Articles", [&] {
-        if (loading_rss || rss_feeds.empty()) return;
-        loading_rss = true;
-        size_t max_items = 0; try { max_items = std::stoul(rss_max_articles); } catch (...) {}
-        status_message = "Fetching RSS...";
-        auto fut = rss_fetcher_.fetch_items(rss_feeds[feed_selected].url, max_items);
-        std::thread([&, fut = std::move(fut)]() mutable {
-            try {
-                auto res = fut.get();
-                std::lock_guard lock(state_mutex);
-                rss_articles = std::move(res);
-                rss_selected.assign(rss_articles.size(), false);
-                rss_article_focused = 0;
-                apply_rss_filter();
-                status_message = "Loaded " + std::to_string(rss_articles.size()) + " articles";
-            } catch (const std::exception& e) { status_message = e.what(); }
-            loading_rss = false;
-            screen.Post(Event::Custom);
-        }).detach();
-    });
-
-    auto btn_stage_rss = Button("✓ Stage Selected", [&] {
-        if (books.empty()) { status_message = "Create a book first!"; return; }
-        if (loading_rss) return;
-
-        std::vector<RssItem> selected_articles;
-        for (size_t i = 0; i < rss_articles.size(); ++i) {
-            if (rss_selected[i]) selected_articles.push_back(rss_articles[i]);
-        }
-        if (selected_articles.empty()) return;
-
-        loading_rss = true;
-        int64_t book_id = books[build_book_selected].id;
-        status_message = "Staging (fetching full content)...";
-
-        std::thread([&, selected_articles = std::move(selected_articles), book_id]() {
-            int base_order = db_.max_sort_order(book_id);
-            int staged = 0;
-
-            bool resolve_stubs = config_.get_bool("fetching", "enable_stub_resolving", true);
-            size_t threshold = config_.get_int("fetching", "stub_char_threshold", 1000);
-            int delay_ms = config_.get_int("fetching", "request_delay_ms", 1000);
-
-            for (const auto& art : selected_articles) {
-                std::string content = art.content_html;
-                if (resolve_stubs && content.size() < threshold && !art.link.empty()) {
-                    {
-                        std::lock_guard lock(state_mutex);
-                        status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_articles.size()) + "]: Resolving stub for " + art.title;
-                    }
-                    screen.Post(Event::Custom);
-
-                    if (staged > 0 && delay_ms > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-                    }
-
-                    try {
-                        auto fut = html_extractor_.fetch_and_extract(art.link);
-                        std::string full_content = fut.get();
-                        if (!full_content.empty()) content = full_content;
-                    } catch (...) {}
-                } else {
-                    std::lock_guard lock(state_mutex);
-                    status_message = "Staging [" + std::to_string(staged+1) + "/" + std::to_string(selected_articles.size()) + "]: " + art.title;
-                    screen.Post(Event::Custom);
-                }
-
-                {
-                    std::lock_guard lock(state_mutex);
-                    db_.add_chapter(book_id, art.title, art.author, sanitize_html(content, true), base_order + staged + 1);
-                    staged++;
-                }
-            }
-            {
-                std::lock_guard lock(state_mutex);
-                status_message = "✓ Staged " + std::to_string(staged) + " articles";
-                rss_selected.assign(rss_articles.size(), false);
-                loading_rss = false;
-                apply_rss_filter();
-                db_.renumber_chapters(book_id);
-                refresh_chapters();
-            }
-            screen.Post(Event::Custom);
-        }).detach();
-    });
-
-    auto btn_rss_select_all = Button("☑ All", [&] {
-        for (const auto& fr : filtered_rss) {
-            for (size_t i = 0; i < rss_articles.size(); ++i) {
-                if (rss_articles[i].link == fr.link) { rss_selected[i] = true; break; }
-            }
-        }
-        apply_rss_filter();
-    });
-
-    auto btn_rss_deselect_all = Button("☐ None", [&] {
-        rss_selected.assign(rss_articles.size(), false);
-        apply_rss_filter();
-    });
-
-    auto input_rss_filter = Input(&rss_filter_text, "Filter...");
-    auto rss_filter_wrapper = CatchEvent(input_rss_filter, [&](Event e) {
-        if (input_rss_filter->OnEvent(e)) { apply_rss_filter(); return true; }
-        return false;
-    });
-
-    auto rss_toggle = CatchEvent(rss_article_menu, [&](Event event) {
-        if ((event == Event::Character(' ') || event == Event::Return) && !filtered_rss.empty() && rss_article_focused >= 0 && rss_article_focused < (int)filtered_rss.size()) {
-            std::string tlink = filtered_rss[rss_article_focused].link;
-            for (size_t i = 0; i < rss_articles.size(); ++i) { if (rss_articles[i].link == tlink) { rss_selected[i] = !rss_selected[i]; break; } }
-            apply_rss_filter(); return true;
-        }
-        return false;
-    });
-
-    DropdownOption rss_book_opt;
-    rss_book_opt.radiobox.entries = &build_book_labels;
-    rss_book_opt.radiobox.selected = &build_book_selected;
-    rss_book_opt.radiobox.on_change = [&] { update_epub_path(); };
-    auto rss_book_dropdown = Dropdown(rss_book_opt);
-
-    int rss_sel1 = 0;
-    int rss_sel3 = 0;
-    int rss_sel4 = 0;
-    int rss_sel_main = 0;
-    Components rss_row1;
-    rss_row1.push_back(Input(&new_feed_title, "Title"));
-    rss_row1.push_back(Input(&new_feed_url, "URL"));
-    rss_row1.push_back(btn_add_rss_feed);
-
-    Components rss_row3;
-    rss_row3.push_back(btn_fetch_rss);
-    rss_row3.push_back(btn_remove_rss_feed);
-    rss_row3.push_back(rss_filter_wrapper);
-
-    Components rss_row4;
-    rss_row4.push_back(btn_rss_select_all);
-    rss_row4.push_back(btn_rss_deselect_all);
-    rss_row4.push_back(btn_stage_rss);
-    rss_row4.push_back(rss_book_dropdown);
-
-    Components rss_main;
-    rss_main.push_back(Container::Horizontal(rss_row1, &rss_sel1));
-    rss_main.push_back(rss_feed_menu);
-    rss_main.push_back(Container::Horizontal(rss_row3, &rss_sel3));
-    rss_main.push_back(Container::Horizontal(rss_row4, &rss_sel4));
-    rss_main.push_back(rss_toggle);
-    auto rss_tab = Container::Vertical(rss_main, &rss_sel_main);
-
-    auto rss_renderer = Renderer(rss_tab, [&] {
-        int rss_sel_count = 0;
-        for (bool s : rss_selected) if (s) rss_sel_count++;
-
-        Elements row1;
-        row1.push_back(text("Add: "));
-        row1.push_back(rss_tab->ChildAt(0)->Render());
-
-        Elements feed_row;
-        feed_row.push_back(rss_feed_menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 6) | border | flex);
-        feed_row.push_back(btn_remove_rss_feed->Render() | center);
-
-        Elements search_row;
-        search_row.push_back(btn_fetch_rss->Render());
-        search_row.push_back(text("  Filter: "));
-        search_row.push_back(rss_filter_wrapper->Render() | flex);
-
-        Elements stage_row;
-        stage_row.push_back(btn_rss_select_all->Render());
-        stage_row.push_back(btn_rss_deselect_all->Render());
-        stage_row.push_back(btn_stage_rss->Render());
-        stage_row.push_back(text(" (" + std::to_string(rss_sel_count) + ")") | bold);
-        stage_row.push_back(text("  → Book: "));
-        stage_row.push_back(rss_book_dropdown->Render());
-
-        Elements rows;
-        rows.push_back(text("🌐 RSS INGEST") | bold | center);
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(row1)));
-        rows.push_back(separator());
-        rows.push_back(text("Feeds:") | bold);
-        rows.push_back(hbox(std::move(feed_row)));
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(search_row)));
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(stage_row)));
-        rows.push_back(separator());
-        rows.push_back(rss_toggle->Render() | vscroll_indicator | frame | flex | border);
-        if (loading_rss.load()) rows.push_back(text("⏳ Loading...") | blink | center);
-
-        return vbox(std::move(rows));
-    });
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  TAB 3: BOOKS
-    // ══════════════════════════════════════════════════════════════════════
-
-    auto book_menu_option = MenuOption::Vertical();
-    book_menu_option.on_change = [&] { refresh_chapters(); };
-    auto book_menu = Menu(&book_labels, &book_selected, book_menu_option);
-    book_menu->TakeFocus();
-
-    auto chapter_menu_option = MenuOption::Vertical();
-    chapter_menu_option.on_enter = [&] {
-        if (!chapters.empty()) {
-            db_.reverse_chapter_order(books[book_selected].id);
+    auto refresh_books = [&]() {
+        books = db_.list_books();
+        book_labels.clear();
+        if (books.empty()) {
+            book_labels.push_back("(No books)");
+            selected_book_id = -1;
+            selected_book_idx = 0;
             refresh_chapters();
+            update_epub_path(true);
+            return;
         }
-    };
-    auto chapter_menu = Menu(&chapter_labels, &chapter_selected, chapter_menu_option);
 
-    auto chapter_menu_wrapper = CatchEvent(chapter_menu, [&](Event e) {
-        if (e == Event::Character('r') || e == Event::Character('R')) {
-            if (!books.empty() && book_selected >= 0) {
-                db_.reverse_chapter_order(books[book_selected].id);
-                refresh_chapters();
+        int matched = -1;
+        for (size_t i = 0; i < books.size(); ++i) {
+            book_labels.push_back(books[i].title + " (" + std::to_string(books[i].chapter_count) + " ch)");
+            if (books[i].id == selected_book_id) matched = static_cast<int>(i);
+        }
+        if (matched >= 0) {
+            selected_book_idx = matched;
+        } else {
+            selected_book_idx = 0;
+            selected_book_id = books[0].id;
+            persist_state("general", "selected_book_id", std::to_string(selected_book_id));
+        }
+        refresh_chapters();
+        update_epub_path(false);
+    };
+
+    auto on_book_selection_changed = [&]() {
+        confirm_action.clear();
+        if (selected_book_idx < 0 || selected_book_idx >= static_cast<int>(books.size())) {
+            selected_book_id = -1;
+        } else {
+            selected_book_id = books[selected_book_idx].id;
+        }
+        custom_output_path_edited = false;
+        persist_state("general", "selected_book_id", std::to_string(selected_book_id));
+        refresh_chapters();
+        update_epub_path(true);
+    };
+
+    auto make_book_dropdown = [&]() {
+        DropdownOption opt;
+        opt.radiobox.entries = &book_labels;
+        opt.radiobox.selected = &selected_book_idx;
+        opt.radiobox.on_change = [&]() { on_book_selection_changed(); };
+        return Dropdown(std::move(opt));
+    };
+
+    // ── Shared staging helper ────────────────────────────────────────────
+    auto run_stage = [&](std::vector<SelectableArticle>& items,
+                         const std::string& label_noun,
+                         StubResolver resolver) {
+        if (is_busy()) {
+            set_status("Another background operation is already running.", true);
+            return;
+        }
+        if (selected_book_id == -1) {
+            set_status("Select or create a Book before staging.", true);
+            return;
+        }
+
+        std::vector<StageItem> chosen;
+        for (const auto& a : items) {
+            if (!a.selected) continue;
+            chosen.push_back(StageItem{a.title, a.author, a.html_body, a.source_id, a.url});
+        }
+        if (chosen.empty()) {
+            set_status("No articles selected.", true);
+            return;
+        }
+
+        StageOptions opts;
+        opts.resolve_stubs = enable_stub_resolving;
+        int threshold = 1000;
+        if (parse_non_negative_int(stub_threshold_text, threshold)) {
+            opts.stub_char_threshold = static_cast<size_t>(threshold);
+        }
+        int delay = 1000;
+        if (parse_non_negative_int(request_delay_text, delay)) {
+            opts.request_delay_ms = delay;
+        }
+
+        staging = true;
+        int64_t target_book_id = selected_book_id;
+        std::string book_name = current_book_title();
+        set_status("Staging " + std::to_string(chosen.size()) + " " + label_noun + "...");
+
+        worker_pool.launch([&, target_book_id, book_name, chosen = std::move(chosen),
+                            opts, resolver = std::move(resolver)]() mutable {
+            try {
+                auto res = stage_articles(
+                    db_, target_book_id, chosen, opts, resolver,
+                    [&](const std::string& msg) {
+                        run_on_ui([&, msg]() { set_status(msg); });
+                    },
+                    worker_pool.stop_flag());
+
+                run_on_ui([&, res, book_name]() {
+                    staging = false;
+                    refresh_books();
+                    std::string msg = "Staged " + std::to_string(res.staged) + " articles into \"" +
+                                      (book_name.empty() ? "Book" : book_name) + "\"";
+                    if (res.stub_failures > 0) {
+                        msg += " (" + std::to_string(res.stub_failures) + " stub resolution warning(s))";
+                    }
+                    set_status(msg, false);
+                });
+            } catch (const std::exception& e) {
+                std::string err = e.what() ? e.what() : "Staging error";
+                run_on_ui([&, err]() {
+                    staging = false;
+                    set_status("Stage Error: " + err, true);
+                });
+            } catch (...) {
+                run_on_ui([&]() {
+                    staging = false;
+                    set_status("Stage Error: unexpected failure", true);
+                });
+            }
+        });
+    };
+
+    // Helper for article Menu with Space/Return toggling without double-dispatch
+    auto make_article_menu = [&](std::vector<SelectableArticle>& items,
+                                 FilteredView& view,
+                                 const std::string& query) {
+        MenuOption mopt;
+        mopt.entries = &view.labels;
+        mopt.selected = &view.cursor;
+        auto menu = Menu(std::move(mopt));
+        return CatchEvent(menu, [&](Event ev) {
+            if (ev != Event::Character(' ') && ev != Event::Return) {
+                return false;
+            }
+            if (view.cursor < 0 || view.cursor >= static_cast<int>(view.source_indices.size())) {
                 return true;
             }
-        }
-        return chapter_menu->OnEvent(e);
-    });
-
-    auto btn_create_book = Button("+ Create Book", [&] {
-        if (new_book_title.empty()) return;
-        (void)db_.create_book(new_book_title); new_book_title.clear(); refresh_books(); status_message = "Book created!";
-    });
-
-    auto btn_delete_book = Button("🗑 Delete", [&] {
-        if (books.empty()) return;
-        db_.delete_book(books[book_selected].id); refresh_books(); refresh_chapters(); status_message = "Book deleted";
-    });
-
-    auto btn_move_up = Button("▲ Up", [&] {
-        if (chapters.size() < 2 || chapter_selected <= 0) return;
-        int i = chapter_selected;
-        db_.update_sort_order(chapters[i].id, chapters[i-1].sort_order);
-        db_.update_sort_order(chapters[i-1].id, chapters[i].sort_order);
-        db_.renumber_chapters(books[book_selected].id);
-        chapter_selected--; refresh_chapters();
-    });
-
-    auto btn_move_down = Button("▼ Down", [&] {
-        if (chapters.size() < 2 || chapter_selected >= (int)chapters.size() - 1) return;
-        int i = chapter_selected;
-        db_.update_sort_order(chapters[i].id, chapters[i+1].sort_order);
-        db_.update_sort_order(chapters[i+1].id, chapters[i].sort_order);
-        db_.renumber_chapters(books[book_selected].id);
-        chapter_selected++; refresh_chapters();
-    });
-
-    auto btn_delete_chapter = Button("✕ Remove", [&] {
-        if (chapters.empty()) return;
-        db_.delete_chapter(chapters[chapter_selected].id);
-        db_.renumber_chapters(books[book_selected].id);
-        refresh_chapters(); status_message = "Chapter removed";
-    });
-
-    auto btn_reverse_chapters = Button("⇅ Reverse", [&] {
-        if (books.empty()) return;
-        db_.reverse_chapter_order(books[book_selected].id);
-        refresh_chapters(); status_message = "Order reversed";
-    });
-
-    int books_sel1_h = 0;
-    int books_sel1_v = 0;
-    int books_sel2_h = 0;
-    int books_sel2_v = 0;
-    int books_sel_main = 0;
-    Components books_row1_h;
-    books_row1_h.push_back(Input(&new_book_title, "New Book"));
-    books_row1_h.push_back(btn_create_book);
-    
-    Components books_row1;
-    books_row1.push_back(book_menu);
-    books_row1.push_back(Container::Horizontal(books_row1_h, &books_sel1_h));
-    books_row1.push_back(btn_delete_book);
-
-    Components books_row2_h;
-    books_row2_h.push_back(btn_move_up);
-    books_row2_h.push_back(btn_move_down);
-    books_row2_h.push_back(btn_reverse_chapters);
-    books_row2_h.push_back(btn_delete_chapter);
-
-    Components books_row2;
-    books_row2.push_back(chapter_menu_wrapper);
-    books_row2.push_back(Container::Horizontal(books_row2_h, &books_sel2_h));
-
-    Components books_main;
-    books_main.push_back(Container::Vertical(books_row1, &books_sel1_v));
-    books_main.push_back(Container::Vertical(books_row2, &books_sel2_v));
-    auto books_tab = Container::Horizontal(books_main, &books_sel_main);
-
-    auto books_renderer = Renderer(books_tab, [&] {
-        Elements left_rows;
-        left_rows.push_back(text("Books") | bold);
-        left_rows.push_back(book_menu->Render() | vscroll_indicator | frame | flex);
-        left_rows.push_back(separator());
-        Elements create_row;
-        create_row.push_back(books_tab->ChildAt(0)->ChildAt(1)->Render());
-        left_rows.push_back(hbox(std::move(create_row)));
-        left_rows.push_back(btn_delete_book->Render());
-
-        Elements right_rows;
-        right_rows.push_back(text("Chapters") | bold);
-        right_rows.push_back(chapter_menu->Render() | vscroll_indicator | frame | flex);
-        right_rows.push_back(separator());
-        right_rows.push_back(books_tab->ChildAt(1)->ChildAt(1)->Render());
-
-        Elements cols;
-        cols.push_back(vbox(std::move(left_rows)) | flex | border);
-        cols.push_back(vbox(std::move(right_rows)) | flex | border);
-
-        return hbox(std::move(cols));
-    });
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  TAB 4: BUILD
-    // ══════════════════════════════════════════════════════════════════════
-
-    auto build_menu_option = MenuOption::Vertical();
-    build_menu_option.on_change = [&] { update_epub_path(); };
-    auto build_book_menu = Menu(&build_book_labels, &build_book_selected, build_menu_option);
-    auto input_output = Input(&epub_output_path, "Path...");
-    auto input_author = Input(&epub_author, "Author");
-    auto input_publisher = Input(&epub_publisher, "Publisher");
-    auto check_append = Checkbox("Append", &append_mode);
-    auto check_simplify = Checkbox("Simplify", &simplify_mode);
-    auto check_keep_images = Checkbox("Images", &keep_images_mode);
-    
-    auto btn_build = Button("📖 BUILD EPUB", [&] {
-        if (building || books.empty() || epub_output_path.empty()) return;
-        building = true; build_status = "Building...";
-        int64_t bid = books[build_book_selected].id;
-        std::string title = books[build_book_selected].title;
-        std::string opath = epub_output_path;
-        if (!opath.empty() && opath[0] == '~') { 
-            const char* h = std::getenv("HOME"); 
-            if (h) opath = std::string(h) + opath.substr(1); 
-        }
-        auto chaps = db_.get_chapters(bid);
-        std::thread([&, chaps = std::move(chaps), title, opath, append = append_mode, simplify = simplify_mode, keepImages = keep_images_mode]() {
-            try {
-                std::map<std::string, std::string> epub_images;
-                std::vector<EpubChapter> ec;
-                int image_counter = 0;
-                // Using libcurl for image downloading below
-
-                for (const auto& c : chaps) {
-                    std::string content = c.content_html;
-                    
-                    if (keepImages) {
-                        std::regex img_re(R"RE(<img\b[^>]*src=["']([^"']+)["'][^>]*>)RE", std::regex::icase);
-                        std::string new_content = content;
-                        
-                        auto it = std::sregex_iterator(content.begin(), content.end(), img_re);
-                        for (; it != std::sregex_iterator(); ++it) {
-                            std::string full_tag = (*it)[0].str();
-                            std::string src = (*it)[1].str();
-                            bool success = false;
-                            std::string local_path;
-                            
-                            if (src.find("http") == 0) {
-                                CURL* curl = curl_easy_init();
-                                if (curl) {
-                                    std::string buffer;
-                                    curl_easy_setopt(curl, CURLOPT_URL, src.c_str());
-                                    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-                                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-                                    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Endpaper/0.1 (Image Downloader; libcurl)");
-                                    
-                                    auto curl_write_cb = +[](void* contents, size_t size, size_t nmemb, void* userp) -> size_t {
-                                        size_t realsize = size * nmemb;
-                                        std::string* mem = static_cast<std::string*>(userp);
-                                        mem->append(static_cast<char*>(contents), realsize);
-                                        return realsize;
-                                    };
-                                    
-                                    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-                                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
-                                    
-                                    CURLcode res = curl_easy_perform(curl);
-                                    long response_code = 0;
-                                    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-                                    
-                                    if (res == CURLE_OK && response_code == 200) {
-                                        QImage img;
-                                        if (img.loadFromData(reinterpret_cast<const uchar*>(buffer.data()), static_cast<int>(buffer.size()))) {
-                                            QByteArray jpegData;
-                                            QBuffer qbuf(&jpegData);
-                                            qbuf.open(QIODevice::WriteOnly);
-                                            if (img.save(&qbuf, "JPEG")) {
-                                                local_path = "images/img_" + std::to_string(++image_counter) + ".jpg";
-                                                epub_images[local_path] = std::string(jpegData.constData(), jpegData.size());
-                                                success = true;
-                                            }
-                                        }
-                                    }
-                                    curl_easy_cleanup(curl);
-                                }
-                            }
-                            
-                            size_t pos = new_content.find(full_tag);
-                            if (pos != std::string::npos) {
-                                if (success) {
-                                    std::string new_tag = "<img src=\"" + local_path + "\"/>";
-                                    new_content.replace(pos, full_tag.length(), new_tag);
-                                } else {
-                                    new_content.erase(pos, full_tag.length());
-                                }
-                            }
-                        }
-                        content = new_content;
-                    }
-                    
-                    content = simplify ? simplify_html(content, keepImages) : sanitize_html(content, keepImages);
-                    ec.push_back(EpubChapter{c.subject, c.sender, content});
-                }
-                
-                EpubMetadata m; m.title = title; m.author = epub_author; m.publisher = epub_publisher;
-                
-                if (append && fs::exists(opath)) {
-                    EpubBuilder::append(opath, ec, epub_images);
-                } else {
-                    EpubBuilder::build(opath, m, ec, epub_images);
-                }
-                
-                build_status = "✓ Success: " + opath;
-            } catch (const std::exception& e) {
-                build_status = std::string("✗ Error: ") + e.what();
+            size_t idx = view.source_indices[view.cursor];
+            if (idx < items.size()) {
+                items[idx].selected = !items[idx].selected;
+                rebuild_filtered_view(items, query, fuzzy_search, view);
             }
-            building = false; screen.Post(Event::Custom);
-        }).detach();
+            return true;
+        });
+    };
+
+    auto select_visible = [&](std::vector<SelectableArticle>& items,
+                              FilteredView& view,
+                              const std::string& query,
+                              bool state) {
+        for (size_t idx : view.source_indices) {
+            if (idx < items.size()) items[idx].selected = state;
+        }
+        rebuild_filtered_view(items, query, fuzzy_search, view);
+    };
+
+    // ═════════════════════════════════════════════════════════════════════
+    // TAB 0: KMAIL (Akonadi)
+    // ═════════════════════════════════════════════════════════════════════
+    std::vector<FolderInfo> folders;
+    std::vector<std::string> folder_labels;
+    int selected_folder_idx = 0;
+
+    std::vector<SelectableArticle> kmail_articles;
+    std::string kmail_filter;
+    FilteredView kmail_view;
+
+    if (cache_metadata) {
+        folders = db_.load_folder_cache();
+        for (size_t i = 0; i < folders.size(); ++i) {
+            folder_labels.push_back(folders[i].full_path);
+            if (folders[i].collection_id == last_kmail_col_id) {
+                selected_folder_idx = static_cast<int>(i);
+            }
+        }
+    }
+
+    auto fetch_kmail_folders = [&]() {
+        if (is_busy()) return;
+        akonadi_available = fetcher_.is_available();
+        if (!akonadi_available) {
+            set_status("Akonadi service unavailable.", true);
+            return;
+        }
+        loading_folders = true;
+        set_status("Fetching KMail folders...");
+        worker_pool.launch([&]() {
+            try {
+                auto result = fetcher_.fetch_folders().get();
+                if (worker_pool.is_shutting_down()) return;
+                if (cache_metadata) db_.save_folder_cache(result);
+
+                run_on_ui([&, result = std::move(result)]() mutable {
+                    loading_folders = false;
+                    folders = std::move(result);
+                    folder_labels.clear();
+                    selected_folder_idx = 0;
+                    for (size_t i = 0; i < folders.size(); ++i) {
+                        folder_labels.push_back(folders[i].full_path);
+                        if (folders[i].collection_id == last_kmail_col_id) {
+                            selected_folder_idx = static_cast<int>(i);
+                        }
+                    }
+                    set_status("Loaded " + std::to_string(folders.size()) + " KMail folders");
+                });
+            } catch (const std::exception& e) {
+                std::string err = e.what() ? e.what() : "Unknown error";
+                run_on_ui([&, err]() {
+                    loading_folders = false;
+                    set_status("KMail Error: " + err, true);
+                });
+            } catch (...) {
+                run_on_ui([&]() {
+                    loading_folders = false;
+                    set_status("KMail Error: unexpected failure", true);
+                });
+            }
+        });
+    };
+
+    auto fetch_kmail_emails = [&]() {
+        if (is_busy()) return;
+        if (selected_folder_idx < 0 || selected_folder_idx >= static_cast<int>(folders.size())) {
+            set_status("Select a KMail folder first.", true);
+            return;
+        }
+        akonadi_available = fetcher_.is_available();
+        if (!akonadi_available) {
+            set_status("Akonadi service unavailable.", true);
+            return;
+        }
+
+        int64_t col_id = folders[selected_folder_idx].collection_id;
+        last_kmail_col_id = col_id;
+        persist_state("state", "last_kmail_collection_id", std::to_string(col_id));
+
+        loading_emails = true;
+        set_status("Fetching emails from " + folders[selected_folder_idx].name + "...");
+        worker_pool.launch([&, col_id]() {
+            try {
+                auto emails = fetcher_.fetch_emails(col_id).get();
+                if (worker_pool.is_shutting_down()) return;
+
+                std::vector<SelectableArticle> out;
+                out.reserve(emails.size());
+                for (auto& em : emails) {
+                    out.push_back(SelectableArticle{
+                        std::move(em.subject), std::move(em.sender), std::move(em.date),
+                        "", std::move(em.html_body), em.akonadi_id, false
+                    });
+                }
+
+                run_on_ui([&, out = std::move(out)]() mutable {
+                    loading_emails = false;
+                    kmail_articles = std::move(out);
+                    rebuild_filtered_view(kmail_articles, kmail_filter, fuzzy_search, kmail_view);
+                    set_status("Loaded " + std::to_string(kmail_articles.size()) + " emails");
+                });
+            } catch (const std::exception& e) {
+                std::string err = e.what() ? e.what() : "Unknown error";
+                run_on_ui([&, err]() {
+                    loading_emails = false;
+                    set_status("Email Fetch Error: " + err, true);
+                });
+            } catch (...) {
+                run_on_ui([&]() {
+                    loading_emails = false;
+                    set_status("Email Fetch Error: unexpected failure", true);
+                });
+            }
+        });
+    };
+
+    MenuOption kmail_folder_mopt;
+    kmail_folder_mopt.entries = &folder_labels;
+    kmail_folder_mopt.selected = &selected_folder_idx;
+    kmail_folder_mopt.on_enter = fetch_kmail_emails;
+    auto kmail_folder_menu = Menu(std::move(kmail_folder_mopt));
+
+    auto kmail_filter_input = make_input(&kmail_filter, "Filter emails...", false, [&]() {
+        rebuild_filtered_view(kmail_articles, kmail_filter, fuzzy_search, kmail_view);
+    });
+    auto kmail_article_menu = make_article_menu(kmail_articles, kmail_view, kmail_filter);
+    auto kmail_book_dd = make_book_dropdown();
+
+    auto kmail_btn_folders = Button("Fetch Folders", fetch_kmail_folders);
+    auto kmail_btn_emails = Button("Load Folder", fetch_kmail_emails);
+    auto kmail_btn_all = Button("Select All", [&]() {
+        select_visible(kmail_articles, kmail_view, kmail_filter, true);
+    });
+    auto kmail_btn_none = Button("Select None", [&]() {
+        select_visible(kmail_articles, kmail_view, kmail_filter, false);
+    });
+    auto kmail_btn_stage = Button("Stage Selected", [&]() {
+        run_stage(kmail_articles, "emails", {});
     });
 
-    int build_sel_main = 0;
-    Components build_main;
-    build_main.push_back(build_book_menu);
-    build_main.push_back(input_output);
-    build_main.push_back(input_author);
-    build_main.push_back(input_publisher);
-    build_main.push_back(check_append);
-    build_main.push_back(check_simplify);
-    build_main.push_back(check_keep_images);
-    build_main.push_back(btn_build);
-    auto build_tab = Container::Vertical(build_main, &build_sel_main);
-    auto build_renderer = Renderer(build_tab, [&] {
-        Elements rows;
-        rows.push_back(text("📖 BUILD") | bold | center);
-        rows.push_back(separator());
-        rows.push_back(text("Select Book:") | bold);
-        rows.push_back(build_book_menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 6) | border);
-        rows.push_back(separator());
-        Elements out_row;
-        out_row.push_back(text("Output:    "));
-        out_row.push_back(input_output->Render() | flex);
-        rows.push_back(hbox(std::move(out_row)));
-
-        Elements auth_row;
-        auth_row.push_back(text("Author:    "));
-        auth_row.push_back(input_author->Render() | flex);
-        rows.push_back(hbox(std::move(auth_row)));
-
-        Elements pub_row;
-        pub_row.push_back(text("Publisher: "));
-        pub_row.push_back(input_publisher->Render() | flex);
-        rows.push_back(hbox(std::move(pub_row)));
-
-        Elements chk_row;
-        chk_row.push_back(check_append->Render());
-        chk_row.push_back(text("    "));
-        chk_row.push_back(check_simplify->Render());
-        chk_row.push_back(text("    "));
-        chk_row.push_back(check_keep_images->Render());
-        rows.push_back(hbox(std::move(chk_row)));
-        rows.push_back(separator());
-        rows.push_back(btn_build->Render() | center);
-        rows.push_back(separator());
-        
-        auto status_text = text(build_status) | center;
-        if (building.load()) status_text = status_text | blink;
-        rows.push_back(status_text);
-
-        return vbox(std::move(rows));
+    auto kmail_container = Container::Vertical({
+        Container::Horizontal({kmail_book_dd, kmail_btn_folders, kmail_btn_emails}),
+        kmail_filter_input,
+        Container::Horizontal({kmail_folder_menu, kmail_article_menu}),
+        Container::Horizontal({kmail_btn_all, kmail_btn_none, kmail_btn_stage}),
     });
 
-    // ══════════════════════════════════════════════════════════════════════
-    //  TAB 5: SETTINGS
-    // ══════════════════════════════════════════════════════════════════════
-
-    auto input_miniflux_url = Input(&miniflux_server_url, "Miniflux URL");
-    auto input_miniflux_token = Input(&miniflux_token, "API Token");
-    auto btn_save_miniflux = Button("Save Miniflux Settings", [&] {
-        config_.set("miniflux", "url", miniflux_server_url);
-        config_.set("miniflux", "token", miniflux_token);
-        config_.save();
-        miniflux_fetcher_.set_credentials(miniflux_server_url, miniflux_token);
-        status_message = "Miniflux settings saved!";
+    auto kmail_renderer = Renderer(kmail_container, [&]() {
+        return vbox({
+            hbox({
+                text(" Book: ") | bold | vcenter,
+                kmail_book_dd->Render(),
+                text("  "),
+                kmail_btn_folders->Render(),
+                text(" "),
+                kmail_btn_emails->Render(),
+                filler(),
+                text(akonadi_available ? "Akonadi: Online " : "Akonadi: Offline ") |
+                    color(akonadi_available ? Color::Green : Color::Red),
+            }),
+            separator(),
+            hbox({text(" Search: ") | bold, kmail_filter_input->Render() | flex}),
+            separator(),
+            hbox({
+                vbox({
+                    text(" Folders (" + std::to_string(folder_labels.size()) + ")") | bold,
+                    kmail_folder_menu->Render() | vscroll_indicator | frame | flex,
+                }) | size(WIDTH, GREATER_THAN, 26) | size(WIDTH, LESS_THAN, 40) | border,
+                vbox({
+                    text(" Emails (" + std::to_string(kmail_view.labels.size()) + ")  [Space/Enter: toggle]") | bold,
+                    kmail_article_menu->Render() | vscroll_indicator | frame | flex,
+                }) | flex | border,
+            }) | flex,
+            hbox({
+                kmail_btn_all->Render(),
+                text(" "),
+                kmail_btn_none->Render(),
+                filler(),
+                kmail_btn_stage->Render(),
+            }),
+        }) | flex;
     });
 
-    auto input_rss_max = Input(&rss_max_articles, "Max Articles");
-    auto btn_save_rss = Button("Save RSS Settings", [&] {
-        config_.set("rss", "max_articles", rss_max_articles);
-        config_.save();
-        status_message = "RSS settings saved!";
+    // ═════════════════════════════════════════════════════════════════════
+    // TAB 1: MINIFLUX
+    // ═════════════════════════════════════════════════════════════════════
+    std::vector<MinifluxCategory> mf_categories;
+    std::vector<std::string> mf_cat_labels;
+    int selected_mf_cat_idx = 0;
+
+    std::vector<std::string> mf_status_options = {"All", "Unread", "Read"};
+    bool mf_starred_only = false;
+
+    std::vector<SelectableArticle> mf_articles;
+    std::string mf_filter;
+    FilteredView mf_view;
+
+    auto rebuild_mf_cat_labels = [&]() {
+        mf_cat_labels.clear();
+        selected_mf_cat_idx = 0;
+        for (size_t i = 0; i < mf_categories.size(); ++i) {
+            std::string lbl = mf_categories[i].title;
+            if (mf_categories[i].unread_count > 0) {
+                lbl += " (" + std::to_string(mf_categories[i].unread_count) + ")";
+            }
+            mf_cat_labels.push_back(std::move(lbl));
+            if (mf_categories[i].id == last_mf_cat_id) {
+                selected_mf_cat_idx = static_cast<int>(i);
+            }
+        }
+    };
+
+    if (cache_metadata) {
+        auto cached_cats = db_.load_category_cache();
+        if (!cached_cats.empty()) {
+            mf_categories = with_all_category(cached_cats);
+            rebuild_mf_cat_labels();
+        }
+    }
+
+    auto fetch_mf_categories = [&]() {
+        if (is_busy()) return;
+        if (trim_copy(mf_url_str).empty()) {
+            set_status("Configure Miniflux Server URL in Settings first.", true);
+            return;
+        }
+        loading_mf_cats = true;
+        set_status("Fetching Miniflux categories...");
+        worker_pool.launch([&]() {
+            try {
+                auto raw = miniflux_fetcher_.fetch_categories().get();
+                if (worker_pool.is_shutting_down()) return;
+                if (cache_metadata) db_.save_category_cache(raw);
+
+                auto wrapped = with_all_category(raw);
+                run_on_ui([&, wrapped = std::move(wrapped)]() mutable {
+                    loading_mf_cats = false;
+                    mf_categories = std::move(wrapped);
+                    rebuild_mf_cat_labels();
+                    set_status("Loaded " + std::to_string(mf_categories.size() > 0 ? mf_categories.size() - 1 : 0) +
+                               " Miniflux categories");
+                });
+            } catch (const std::exception& e) {
+                std::string err = e.what() ? e.what() : "Unknown error";
+                run_on_ui([&, err]() {
+                    loading_mf_cats = false;
+                    set_status("Miniflux Error: " + err, true);
+                });
+            } catch (...) {
+                run_on_ui([&]() {
+                    loading_mf_cats = false;
+                    set_status("Miniflux Error: unexpected failure", true);
+                });
+            }
+        });
+    };
+
+    auto fetch_mf_entries = [&]() {
+        if (is_busy()) return;
+        if (trim_copy(mf_url_str).empty()) {
+            set_status("Configure Miniflux Server URL in Settings first.", true);
+            return;
+        }
+
+        int64_t cat_id = -1;
+        if (selected_mf_cat_idx >= 0 && selected_mf_cat_idx < static_cast<int>(mf_categories.size())) {
+            cat_id = mf_categories[selected_mf_cat_idx].id;
+        }
+        last_mf_cat_id = cat_id;
+        persist_state("state", "last_miniflux_category_id", std::to_string(cat_id));
+        persist_state("state", "last_miniflux_status_filter", std::to_string(mf_status_idx));
+
+        MinifluxFetcher::FetchParams params;
+        params.category_id = cat_id;
+        if (mf_status_idx == 1) params.status = "unread";
+        else if (mf_status_idx == 2) params.status = "read";
+        params.starred = mf_starred_only;
+        params.search = trim_copy(mf_filter);
+
+        loading_mf_entries = true;
+        set_status("Fetching Miniflux entries...");
+        worker_pool.launch([&, params]() {
+            try {
+                auto entries = miniflux_fetcher_.fetch_entries(params).get();
+                if (worker_pool.is_shutting_down()) return;
+
+                std::vector<SelectableArticle> out;
+                out.reserve(entries.size());
+                for (auto& en : entries) {
+                    out.push_back(SelectableArticle{
+                        std::move(en.title), std::move(en.author), std::move(en.published_at),
+                        std::move(en.url), std::move(en.content), en.id, false
+                    });
+                }
+
+                run_on_ui([&, out = std::move(out)]() mutable {
+                    loading_mf_entries = false;
+                    mf_articles = std::move(out);
+                    rebuild_filtered_view(mf_articles, mf_filter, fuzzy_search, mf_view);
+                    set_status("Loaded " + std::to_string(mf_articles.size()) + " Miniflux entries");
+                });
+            } catch (const std::exception& e) {
+                std::string err = e.what() ? e.what() : "Unknown error";
+                run_on_ui([&, err]() {
+                    loading_mf_entries = false;
+                    set_status("Miniflux Error: " + err, true);
+                });
+            } catch (...) {
+                run_on_ui([&]() {
+                    loading_mf_entries = false;
+                    set_status("Miniflux Error: unexpected failure", true);
+                });
+            }
+        });
+    };
+
+    MenuOption mf_cat_mopt;
+    mf_cat_mopt.entries = &mf_cat_labels;
+    mf_cat_mopt.selected = &selected_mf_cat_idx;
+    mf_cat_mopt.on_enter = fetch_mf_entries;
+    auto mf_cat_menu = Menu(std::move(mf_cat_mopt));
+
+    RadioboxOption mf_status_ropt;
+    mf_status_ropt.entries = &mf_status_options;
+    mf_status_ropt.selected = &mf_status_idx;
+    mf_status_ropt.on_change = [&]() {
+        persist_state("state", "last_miniflux_status_filter", std::to_string(mf_status_idx));
+    };
+    auto mf_status_radio = Radiobox(std::move(mf_status_ropt));
+    auto mf_starred_cb = Checkbox("Starred only", &mf_starred_only);
+
+    auto mf_filter_input = make_input(&mf_filter, "Filter entries (or server search)...", false, [&]() {
+        rebuild_filtered_view(mf_articles, mf_filter, fuzzy_search, mf_view);
+    });
+    auto mf_article_menu = make_article_menu(mf_articles, mf_view, mf_filter);
+    auto mf_book_dd = make_book_dropdown();
+
+    auto mf_btn_cats = Button("Fetch Categories", fetch_mf_categories);
+    auto mf_btn_entries = Button("Fetch Entries", fetch_mf_entries);
+    auto mf_btn_all = Button("Select All", [&]() {
+        select_visible(mf_articles, mf_view, mf_filter, true);
+    });
+    auto mf_btn_none = Button("Select None", [&]() {
+        select_visible(mf_articles, mf_view, mf_filter, false);
+    });
+    auto mf_btn_stage = Button("Stage Selected", [&]() {
+        run_stage(mf_articles, "Miniflux entries", [&](const StageItem& it) {
+            return miniflux_fetcher_.fetch_original_content(it.source_id).get();
+        });
     });
 
-    auto btn_save_fuzzy = Button("Toggle & Save Fuzzy Search", [&] {
-        fuzzy_search = !fuzzy_search;
+    auto mf_container = Container::Vertical({
+        Container::Horizontal({mf_book_dd, mf_btn_cats, mf_btn_entries, mf_starred_cb}),
+        Container::Horizontal({mf_status_radio, mf_filter_input}),
+        Container::Horizontal({mf_cat_menu, mf_article_menu}),
+        Container::Horizontal({mf_btn_all, mf_btn_none, mf_btn_stage}),
+    });
+
+    auto mf_renderer = Renderer(mf_container, [&]() {
+        return vbox({
+            hbox({
+                text(" Book: ") | bold | vcenter,
+                mf_book_dd->Render(),
+                text("  "),
+                mf_btn_cats->Render(),
+                text(" "),
+                mf_btn_entries->Render(),
+                text("  "),
+                mf_starred_cb->Render() | vcenter,
+            }),
+            separator(),
+            hbox({
+                text(" Status: ") | bold | vcenter,
+                mf_status_radio->Render(),
+                text("  Search: ") | bold | vcenter,
+                mf_filter_input->Render() | flex,
+            }),
+            separator(),
+            hbox({
+                vbox({
+                    text(" Categories (" + std::to_string(mf_cat_labels.size()) + ")") | bold,
+                    mf_cat_menu->Render() | vscroll_indicator | frame | flex,
+                }) | size(WIDTH, GREATER_THAN, 26) | size(WIDTH, LESS_THAN, 40) | border,
+                vbox({
+                    text(" Entries (" + std::to_string(mf_view.labels.size()) + ")  [Space/Enter: toggle]") | bold,
+                    mf_article_menu->Render() | vscroll_indicator | frame | flex,
+                }) | flex | border,
+            }) | flex,
+            hbox({
+                mf_btn_all->Render(),
+                text(" "),
+                mf_btn_none->Render(),
+                filler(),
+                mf_btn_stage->Render(),
+            }),
+        }) | flex;
+    });
+
+    // ═════════════════════════════════════════════════════════════════════
+    // TAB 2: RSS FEEDS
+    // ═════════════════════════════════════════════════════════════════════
+    std::vector<RssFeed> rss_feeds;
+    std::vector<std::string> rss_feed_labels;
+    int selected_rss_feed_idx = 0;
+
+    std::string new_rss_title;
+    std::string new_rss_url;
+    std::vector<SelectableArticle> rss_articles;
+    std::string rss_filter;
+    FilteredView rss_view;
+
+    auto refresh_rss_feeds = [&]() {
+        rss_feeds = db_.list_rss_feeds();
+        rss_feed_labels.clear();
+        selected_rss_feed_idx = 0;
+        for (size_t i = 0; i < rss_feeds.size(); ++i) {
+            rss_feed_labels.push_back(rss_feeds[i].title);
+            if (rss_feeds[i].id == last_rss_feed_id) {
+                selected_rss_feed_idx = static_cast<int>(i);
+            }
+        }
+    };
+    refresh_rss_feeds();
+
+    auto fetch_rss_entries = [&]() {
+        if (is_busy()) return;
+        if (selected_rss_feed_idx < 0 || selected_rss_feed_idx >= static_cast<int>(rss_feeds.size())) {
+            set_status("Select an RSS feed first.", true);
+            return;
+        }
+        const auto& feed = rss_feeds[selected_rss_feed_idx];
+        last_rss_feed_id = feed.id;
+        persist_state("state", "last_rss_feed_id", std::to_string(feed.id));
+
+        int max_items_i = 50;
+        if (!parse_non_negative_int(rss_max_articles_text, max_items_i)) {
+            max_items_i = 50;
+        }
+        size_t max_items = static_cast<size_t>(max_items_i);
+        std::string feed_url = feed.url;
+        std::string feed_title = feed.title;
+
+        loading_rss = true;
+        set_status("Fetching RSS feed: " + feed_title + "...");
+        worker_pool.launch([&, feed_url, max_items]() {
+            try {
+                auto items = rss_fetcher_.fetch_items(feed_url, max_items).get();
+                if (worker_pool.is_shutting_down()) return;
+
+                std::vector<SelectableArticle> out;
+                out.reserve(items.size());
+                for (auto& it : items) {
+                    out.push_back(SelectableArticle{
+                        std::move(it.title), std::move(it.author), std::move(it.date),
+                        std::move(it.link), std::move(it.content_html), 0, false
+                    });
+                }
+
+                run_on_ui([&, out = std::move(out)]() mutable {
+                    loading_rss = false;
+                    rss_articles = std::move(out);
+                    rebuild_filtered_view(rss_articles, rss_filter, fuzzy_search, rss_view);
+                    set_status("Loaded " + std::to_string(rss_articles.size()) + " RSS articles");
+                });
+            } catch (const std::exception& e) {
+                std::string err = e.what() ? e.what() : "Unknown error";
+                run_on_ui([&, err]() {
+                    loading_rss = false;
+                    set_status("RSS Error: " + err, true);
+                });
+            } catch (...) {
+                run_on_ui([&]() {
+                    loading_rss = false;
+                    set_status("RSS Error: unexpected failure", true);
+                });
+            }
+        });
+    };
+
+    MenuOption rss_feed_mopt;
+    rss_feed_mopt.entries = &rss_feed_labels;
+    rss_feed_mopt.selected = &selected_rss_feed_idx;
+    rss_feed_mopt.on_enter = fetch_rss_entries;
+    auto rss_feed_menu = Menu(std::move(rss_feed_mopt));
+
+    auto rss_title_input = make_input(&new_rss_title, "Feed title...");
+    auto rss_url_input = make_input(&new_rss_url, "https://.../feed.xml");
+    auto rss_filter_input = make_input(&rss_filter, "Filter RSS entries...", false, [&]() {
+        rebuild_filtered_view(rss_articles, rss_filter, fuzzy_search, rss_view);
+    });
+    auto rss_article_menu = make_article_menu(rss_articles, rss_view, rss_filter);
+    auto rss_book_dd = make_book_dropdown();
+
+    auto rss_btn_add = Button("Add Feed", [&]() {
+        if (is_busy()) {
+            set_status("Wait for background work to finish.", true);
+            return;
+        }
+        std::string t = trim_copy(new_rss_title);
+        std::string u = trim_copy(new_rss_url);
+        if (t.empty() || u.empty()) {
+            set_status("Feed title and URL are required.", true);
+            return;
+        }
+        if (!db_.add_rss_feed(t, u)) {
+            set_status("RSS feed already exists: " + u, true);
+            return;
+        }
+        new_rss_title.clear();
+        new_rss_url.clear();
+        confirm_action.clear();
+        refresh_rss_feeds();
+        set_status("Added RSS feed: " + t);
+    });
+    auto rss_btn_fetch = Button("Fetch Feed", fetch_rss_entries);
+    auto rss_btn_remove = Button("Remove Feed", [&]() {
+        if (is_busy()) {
+            set_status("Wait for background work to finish.", true);
+            return;
+        }
+        if (selected_rss_feed_idx < 0 || selected_rss_feed_idx >= static_cast<int>(rss_feeds.size())) {
+            set_status("No RSS feed selected.", true);
+            return;
+        }
+        int64_t fid = rss_feeds[selected_rss_feed_idx].id;
+        std::string fname = rss_feeds[selected_rss_feed_idx].title;
+        std::string token = "remove_feed:" + std::to_string(fid);
+        if (confirm_action != token) {
+            confirm_action = token;
+            set_status("Press Remove Feed again to confirm removing \"" + fname + "\"", true);
+            return;
+        }
+        confirm_action.clear();
+        db_.delete_rss_feed(fid);
+        if (last_rss_feed_id == fid) {
+            last_rss_feed_id = -1;
+            persist_state("state", "last_rss_feed_id", "-1");
+            rss_articles.clear();
+            rebuild_filtered_view(rss_articles, rss_filter, fuzzy_search, rss_view);
+        }
+        refresh_rss_feeds();
+        set_status("Removed RSS feed: " + fname);
+    });
+    auto rss_btn_all = Button("Select All", [&]() {
+        select_visible(rss_articles, rss_view, rss_filter, true);
+    });
+    auto rss_btn_none = Button("Select None", [&]() {
+        select_visible(rss_articles, rss_view, rss_filter, false);
+    });
+    auto rss_btn_stage = Button("Stage Selected", [&]() {
+        run_stage(rss_articles, "RSS entries", [&](const StageItem& it) {
+            return it.url.empty() ? std::string{} : html_extractor_.fetch_and_extract(it.url).get();
+        });
+    });
+
+    auto rss_container = Container::Vertical({
+        Container::Horizontal({rss_book_dd, rss_title_input, rss_url_input, rss_btn_add}),
+        rss_filter_input,
+        Container::Horizontal({rss_feed_menu, rss_article_menu}),
+        Container::Horizontal({rss_btn_fetch, rss_btn_remove, rss_btn_all, rss_btn_none, rss_btn_stage}),
+    });
+
+    auto rss_renderer = Renderer(rss_container, [&]() {
+        return vbox({
+            hbox({
+                text(" Book: ") | bold | vcenter,
+                rss_book_dd->Render(),
+                text("  Title: ") | bold | vcenter,
+                rss_title_input->Render() | size(WIDTH, GREATER_THAN, 16),
+                text(" URL: ") | bold | vcenter,
+                rss_url_input->Render() | flex,
+                text(" "),
+                rss_btn_add->Render(),
+            }),
+            separator(),
+            hbox({text(" Search: ") | bold, rss_filter_input->Render() | flex}),
+            separator(),
+            hbox({
+                vbox({
+                    text(" Feeds (" + std::to_string(rss_feed_labels.size()) + ")") | bold,
+                    rss_feed_menu->Render() | vscroll_indicator | frame | flex,
+                }) | size(WIDTH, GREATER_THAN, 26) | size(WIDTH, LESS_THAN, 40) | border,
+                vbox({
+                    text(" Articles (" + std::to_string(rss_view.labels.size()) + ")  [Space/Enter: toggle]") | bold,
+                    rss_article_menu->Render() | vscroll_indicator | frame | flex,
+                }) | flex | border,
+            }) | flex,
+            hbox({
+                rss_btn_fetch->Render(),
+                text(" "),
+                rss_btn_remove->Render(),
+                text("   "),
+                rss_btn_all->Render(),
+                text(" "),
+                rss_btn_none->Render(),
+                filler(),
+                rss_btn_stage->Render(),
+            }),
+        }) | flex;
+    });
+
+    // ═════════════════════════════════════════════════════════════════════
+    // TAB 3: BOOKS & CHAPTERS
+    // ═════════════════════════════════════════════════════════════════════
+    auto new_book_input = make_input(&new_book_title, "New book title...");
+    auto books_book_dd = make_book_dropdown();
+
+    auto remove_selected_chapter = [&]() {
+        if (staging || building) {
+            set_status("Cannot modify chapters while staging or building.", true);
+            return;
+        }
+        if (selected_book_id == -1 || selected_chapter_idx < 0 ||
+            selected_chapter_idx >= static_cast<int>(chapters.size())) {
+            set_status("No chapter selected.", true);
+            return;
+        }
+        int saved_idx = selected_chapter_idx;
+        std::string title = chapters[saved_idx].subject;
+        db_.delete_chapter(chapters[saved_idx].id);
+        db_.renumber_chapters(selected_book_id);
+        confirm_action.clear();
+        refresh_books();
+        if (!chapters.empty()) {
+            selected_chapter_idx = std::min(saved_idx, static_cast<int>(chapters.size()) - 1);
+        }
+        set_status("Removed chapter: " + title);
+    };
+
+    MenuOption ch_mopt;
+    ch_mopt.entries = &chapter_labels;
+    ch_mopt.selected = &selected_chapter_idx;
+    auto raw_chapter_menu = Menu(std::move(ch_mopt));
+    auto chapter_menu = CatchEvent(raw_chapter_menu, [&](Event ev) {
+        if (ev == Event::Character('r') || ev == Event::Character('R') || ev == Event::Delete) {
+            remove_selected_chapter();
+            return true;
+        }
+        return false;
+    });
+
+    auto books_btn_create = Button("Create Book", [&]() {
+        if (staging || building) {
+            set_status("Cannot create a book while staging or building.", true);
+            return;
+        }
+        std::string title = trim_copy(new_book_title);
+        if (title.empty()) {
+            set_status("Book title cannot be empty.", true);
+            return;
+        }
+        int64_t new_id = db_.create_book(title);
+        selected_book_id = new_id;
+        custom_output_path_edited = false;
+        persist_state("general", "selected_book_id", std::to_string(new_id));
+        new_book_title.clear();
+        confirm_action.clear();
+        refresh_books();
+        set_status("Created book: " + title);
+    });
+
+    auto books_btn_delete = Button("Delete Book", [&]() {
+        if (staging || building) {
+            set_status("Cannot delete a book while staging or building.", true);
+            return;
+        }
+        if (selected_book_id == -1) {
+            set_status("No book selected.", true);
+            return;
+        }
+        std::string name = current_book_title();
+        std::string token = "delete_book:" + std::to_string(selected_book_id);
+        if (confirm_action != token) {
+            confirm_action = token;
+            set_status("Press Delete Book again to confirm deleting \"" + name + "\"", true);
+            return;
+        }
+        confirm_action.clear();
+        db_.delete_book(selected_book_id);
+        selected_book_id = -1;
+        custom_output_path_edited = false;
+        refresh_books();
+        set_status("Deleted book: " + name);
+    });
+
+    auto move_selected_chapter = [&](int delta) {
+        if (staging || building) {
+            set_status("Cannot reorder chapters while staging or building.", true);
+            return;
+        }
+        if (selected_book_id == -1 || selected_chapter_idx < 0 ||
+            selected_chapter_idx >= static_cast<int>(chapters.size())) {
+            return;
+        }
+        int target = selected_chapter_idx + delta;
+        if (target < 0 || target >= static_cast<int>(chapters.size())) return;
+        int64_t cid = chapters[selected_chapter_idx].id;
+        if (db_.move_chapter(selected_book_id, cid, delta)) {
+            confirm_action.clear();
+            refresh_chapters();
+            selected_chapter_idx = target;
+        }
+    };
+
+    auto books_btn_up = Button("↑ Move Up", [&]() { move_selected_chapter(-1); });
+    auto books_btn_down = Button("↓ Move Down", [&]() { move_selected_chapter(+1); });
+    auto books_btn_autosort = Button("Auto-Sort", [&]() {
+        if (staging || building) {
+            set_status("Cannot sort chapters while staging or building.", true);
+            return;
+        }
+        if (selected_book_id == -1) return;
+        confirm_action.clear();
+        db_.auto_sort_chapters(selected_book_id);
+        refresh_chapters();
+        set_status("Chapters auto-sorted by numeric title.");
+    });
+    auto books_btn_reverse = Button("Reverse Order", [&]() {
+        if (staging || building) {
+            set_status("Cannot reverse chapters while staging or building.", true);
+            return;
+        }
+        if (selected_book_id == -1) return;
+        confirm_action.clear();
+        db_.reverse_chapter_order(selected_book_id);
+        refresh_chapters();
+        set_status("Reversed chapter order.");
+    });
+    auto books_btn_remove = Button("Remove Chapter", remove_selected_chapter);
+    auto books_btn_clear = Button("Clear All Chapters", [&]() {
+        if (staging || building) {
+            set_status("Cannot clear chapters while staging or building.", true);
+            return;
+        }
+        if (selected_book_id == -1 || chapters.empty()) return;
+        std::string token = "clear_chapters:" + std::to_string(selected_book_id);
+        if (confirm_action != token) {
+            confirm_action = token;
+            set_status("Press Clear All Chapters again to confirm clearing all chapters", true);
+            return;
+        }
+        confirm_action.clear();
+        db_.delete_all_chapters(selected_book_id);
+        refresh_books();
+        set_status("Cleared all chapters from book.");
+    });
+
+    auto books_container = Container::Vertical({
+        Container::Horizontal({books_book_dd, new_book_input, books_btn_create, books_btn_delete}),
+        chapter_menu,
+        Container::Horizontal({
+            books_btn_up, books_btn_down, books_btn_autosort,
+            books_btn_reverse, books_btn_remove, books_btn_clear,
+        }),
+    });
+
+    auto books_renderer = Renderer(books_container, [&]() {
+        return vbox({
+            hbox({
+                text(" Active Book: ") | bold | vcenter,
+                books_book_dd->Render(),
+                text("  New Book: ") | bold | vcenter,
+                new_book_input->Render() | flex,
+                text(" "),
+                books_btn_create->Render(),
+                text(" "),
+                books_btn_delete->Render(),
+            }),
+            separator(),
+            vbox({
+                text(" Chapters (" + std::to_string(chapters.size()) + ")  [r/Del: remove]") | bold,
+                chapter_menu->Render() | vscroll_indicator | frame | flex,
+            }) | flex | border,
+            hbox({
+                books_btn_up->Render(),
+                text(" "),
+                books_btn_down->Render(),
+                text(" "),
+                books_btn_autosort->Render(),
+                text(" "),
+                books_btn_reverse->Render(),
+                filler(),
+                books_btn_remove->Render(),
+                text(" "),
+                books_btn_clear->Render(),
+            }),
+        }) | flex;
+    });
+
+    // ═════════════════════════════════════════════════════════════════════
+    // TAB 4: BUILD EPUB
+    // ═════════════════════════════════════════════════════════════════════
+    auto build_book_dd = make_book_dropdown();
+    auto build_author_input = make_input(&epub_author, "Unknown");
+    auto build_publisher_input = make_input(&epub_publisher, "Endpaper");
+    auto build_path_input = make_input(&epub_output_path, "Auto output path...", false, [&]() {
+        custom_output_path_edited = true;
+    });
+    auto build_append_cb = Checkbox("Append to existing EPUB (this build only)", &append_mode);
+    auto build_simplify_cb = [&]() {
+        CheckboxOption opt = CheckboxOption::Simple();
+        opt.label = "Simplify HTML for e-ink";
+        opt.checked = &simplify_html_opt;
+        opt.on_change = [&]() {
+            config_.set("epub", "simplify", simplify_html_opt ? "true" : "false");
+            config_.save();
+        };
+        return Checkbox(std::move(opt));
+    }();
+    auto build_images_cb = [&]() {
+        CheckboxOption opt = CheckboxOption::Simple();
+        opt.label = "Embed & optimize images (B&W JPEG <=480px)";
+        opt.checked = &keep_images_opt;
+        opt.on_change = [&]() {
+            config_.set("epub", "keep_images", keep_images_opt ? "true" : "false");
+            config_.save();
+        };
+        return Checkbox(std::move(opt));
+    }();
+
+    auto build_btn_reset_path = Button("Reset Path", [&]() {
+        custom_output_path_edited = false;
+        update_epub_path(true);
+    });
+
+    auto build_btn_start = Button("Build EPUB", [&]() {
+        if (is_busy()) {
+            set_status("Another background operation is running.", true);
+            return;
+        }
+        if (selected_book_id == -1) {
+            set_status("No book selected.", true);
+            return;
+        }
+        auto chs = db_.get_chapters(selected_book_id);
+        if (chs.empty()) {
+            set_status("Book has no staged chapters.", true);
+            return;
+        }
+
+        BuildOptions opts;
+        std::string a = trim_copy(epub_author);
+        std::string p = trim_copy(epub_publisher);
+        opts.author = a.empty() ? "Unknown" : a;
+        opts.publisher = p.empty() ? "Endpaper" : p;
+        opts.explicit_path = trim_copy(epub_output_path);
+        opts.default_folder = trim_copy(default_folder);
+        opts.append = append_mode;
+        opts.simplify = simplify_html_opt;
+        opts.keep_images = keep_images_opt;
+
+        std::string title = current_book_title();
+        if (title.empty()) title = "book";
+
+        building = true;
+        set_status("Building EPUB: " + title + "...");
+
+        worker_pool.launch([&, title, chs = std::move(chs), opts]() mutable {
+            try {
+                auto result = build_book_epub(
+                    title, chs, opts,
+                    [&](const std::string& step) {
+                        run_on_ui([&, step]() { set_status(step); });
+                    },
+                    worker_pool.stop_flag());
+
+                run_on_ui([&, result, opts]() {
+                    building = false;
+                    set_status(format_build_summary(result, opts.keep_images), false);
+                });
+            } catch (const std::exception& e) {
+                std::string err = e.what() ? e.what() : "Build failure";
+                run_on_ui([&, err]() {
+                    building = false;
+                    set_status("Build Error: " + err, true);
+                });
+            } catch (...) {
+                run_on_ui([&]() {
+                    building = false;
+                    set_status("Build Error: unexpected failure", true);
+                });
+            }
+        });
+    });
+
+    auto build_container = Container::Vertical({
+        build_book_dd,
+        build_author_input,
+        build_publisher_input,
+        Container::Horizontal({build_path_input, build_btn_reset_path}),
+        build_append_cb,
+        build_simplify_cb,
+        build_images_cb,
+        build_btn_start,
+    });
+
+    auto build_renderer = Renderer(build_container, [&]() {
+        return vbox({
+            hbox({text(" Target Book:     ") | bold | vcenter, build_book_dd->Render()}),
+            hbox({text(" Chapters Ready:  ") | bold, text(std::to_string(chapters.size()))}),
+            separator(),
+            hbox({text(" Author:          ") | bold, build_author_input->Render() | flex}),
+            hbox({text(" Publisher:       ") | bold, build_publisher_input->Render() | flex}),
+            hbox({
+                text(" Output File:     ") | bold | vcenter,
+                build_path_input->Render() | flex,
+                text(" "),
+                build_btn_reset_path->Render(),
+            }),
+            separator(),
+            build_append_cb->Render(),
+            build_simplify_cb->Render(),
+            build_images_cb->Render(),
+            filler(),
+            hbox({build_btn_start->Render(), filler()}),
+        }) | border | flex;
+    });
+
+    // ═════════════════════════════════════════════════════════════════════
+    // TAB 5: SETTINGS
+    // ═════════════════════════════════════════════════════════════════════
+    // Miniflux URL first so F6 places focus cleanly on miniflux_server_url
+    auto set_mf_url_input = make_input(&mf_url_str, "https://miniflux.example.com");
+    auto set_mf_token_input = make_input(&mf_token_str, "API token...", true);
+    auto set_folder_input = make_input(&default_folder, "~/EPUBs");
+    auto set_author_input = make_input(&epub_author, "Unknown");
+    auto set_publisher_input = make_input(&epub_publisher, "Endpaper");
+    auto set_rss_max_input = make_input(&rss_max_articles_text, "50");
+    auto set_stub_thresh_input = make_input(&stub_threshold_text, "1000");
+    auto set_delay_input = make_input(&request_delay_text, "1000");
+
+    auto set_auto_kmail_cb = Checkbox("Auto-fetch KMail folders on start", &auto_fetch_kmail);
+    auto set_auto_mf_cb = Checkbox("Auto-fetch Miniflux categories on start", &auto_fetch_miniflux);
+    auto set_cache_cb = Checkbox("Cache folders & categories locally", &cache_metadata);
+    auto set_remember_cb = Checkbox("Remember active tab, book & folder state", &remember_state);
+    auto set_fuzzy_cb = [&]() {
+        CheckboxOption opt = CheckboxOption::Simple();
+        opt.label = "Fuzzy article search (off = regex)";
+        opt.checked = &fuzzy_search;
+        opt.on_change = [&]() {
+            rebuild_filtered_view(kmail_articles, kmail_filter, fuzzy_search, kmail_view);
+            rebuild_filtered_view(mf_articles, mf_filter, fuzzy_search, mf_view);
+            rebuild_filtered_view(rss_articles, rss_filter, fuzzy_search, rss_view);
+        };
+        return Checkbox(std::move(opt));
+    }();
+    auto set_stub_cb = Checkbox("Resolve short stub articles from original URL", &enable_stub_resolving);
+
+    auto set_btn_refresh_akonadi = Button("Refresh Akonadi Status", [&]() {
+        akonadi_available = fetcher_.is_available();
+        set_status(akonadi_available ? "Akonadi service online." : "Akonadi service unavailable.",
+                   !akonadi_available);
+    });
+
+    auto set_btn_save = Button("Save Settings", [&]() {
+        int rss_max = 0, stub_thresh = 0, delay_ms = 0;
+        if (!parse_non_negative_int(rss_max_articles_text, rss_max)) {
+            set_status("RSS max articles must be a non-negative integer.", true);
+            return;
+        }
+        if (!parse_non_negative_int(stub_threshold_text, stub_thresh)) {
+            set_status("Stub threshold must be a non-negative integer.", true);
+            return;
+        }
+        if (!parse_non_negative_int(request_delay_text, delay_ms)) {
+            set_status("Request delay (ms) must be a non-negative integer.", true);
+            return;
+        }
+
+        mf_url_str = trim_copy(mf_url_str);
+        mf_token_str = trim_copy(mf_token_str);
+        default_folder = trim_copy(default_folder);
+        rss_max_articles_text = std::to_string(rss_max);
+        stub_threshold_text = std::to_string(stub_thresh);
+        request_delay_text = std::to_string(delay_ms);
+
+        config_.set("miniflux", "url", mf_url_str);
+        config_.set("miniflux", "token", mf_token_str);
+        config_.set("general", "default_folder", default_folder);
+        config_.set("general", "auto_fetch_kmail", auto_fetch_kmail ? "true" : "false");
+        config_.set("general", "auto_fetch_miniflux", auto_fetch_miniflux ? "true" : "false");
+        config_.set("general", "cache_metadata", cache_metadata ? "true" : "false");
+        config_.set("general", "remember_state", remember_state ? "true" : "false");
         config_.set("ui", "fuzzy_search", fuzzy_search ? "true" : "false");
-        config_.save();
-        status_message = "Fuzzy search " + std::string(fuzzy_search ? "enabled" : "disabled");
-    });
-
-    auto check_auto_akonadi = Checkbox("Auto-fetch Akonadi Folders on KMail tab", &auto_fetch_akonadi);
-    auto check_auto_miniflux = Checkbox("Auto-fetch Miniflux Categories on Miniflux tab", &auto_fetch_miniflux);
-    auto check_remember_config = Checkbox("Remember state (tab, folders, filters) across launches", &remember_config);
-    auto btn_save_behavior = Button("Save Behavior Settings", [&] {
-        config_.set("behavior", "auto_fetch_akonadi", auto_fetch_akonadi ? "true" : "false");
-        config_.set("behavior", "auto_fetch_miniflux", auto_fetch_miniflux ? "true" : "false");
-        config_.set("behavior", "remember_config", remember_config ? "true" : "false");
-        config_.save();
-        status_message = "Behavior settings saved!";
-    });
-
-    auto check_resolve_stubs = Checkbox("Automatically resolve article stubs during staging", &enable_stub_resolving);
-    auto input_stub_threshold = Input(&stub_threshold_text, "Threshold (chars)");
-    auto input_request_delay = Input(&request_delay_text, "Request Delay (ms)");
-    auto btn_save_fetching = Button("Save Fetching Settings", [&] {
+        config_.set("epub", "author", trim_copy(epub_author).empty() ? "Unknown" : trim_copy(epub_author));
+        config_.set("epub", "publisher", trim_copy(epub_publisher).empty() ? "Endpaper" : trim_copy(epub_publisher));
+        config_.set("epub", "simplify", simplify_html_opt ? "true" : "false");
+        config_.set("epub", "keep_images", keep_images_opt ? "true" : "false");
+        config_.set("rss", "max_articles", rss_max_articles_text);
         config_.set("fetching", "enable_stub_resolving", enable_stub_resolving ? "true" : "false");
         config_.set("fetching", "stub_char_threshold", stub_threshold_text);
         config_.set("fetching", "request_delay_ms", request_delay_text);
+
         config_.save();
-        status_message = "Fetching settings saved!";
+        miniflux_fetcher_.set_credentials(mf_url_str, mf_token_str);
+        update_epub_path(true);
+        set_status("Settings saved to " + config_.config_file().string());
     });
 
-    int settings_sel_main = 0;
-    Components settings_main;
-    settings_main.push_back(input_miniflux_url);
-    settings_main.push_back(input_miniflux_token);
-    settings_main.push_back(btn_save_miniflux);
-    settings_main.push_back(input_rss_max);
-    settings_main.push_back(btn_save_rss);
-    settings_main.push_back(btn_save_fuzzy);
-    settings_main.push_back(check_auto_akonadi);
-    settings_main.push_back(check_auto_miniflux);
-    settings_main.push_back(check_remember_config);
-    settings_main.push_back(btn_save_behavior);
-    settings_main.push_back(check_resolve_stubs);
-    settings_main.push_back(input_stub_threshold);
-    settings_main.push_back(input_request_delay);
-    settings_main.push_back(btn_save_fetching);
-    auto settings_tab = Container::Vertical(settings_main, &settings_sel_main);
-    auto settings_renderer = Renderer(settings_tab, [&] {
-        Elements rows;
-        rows.push_back(text("⚙ SETTINGS") | bold | center);
-        rows.push_back(separator());
-        rows.push_back(text("Miniflux API") | bold);
-        Elements url_row;
-        url_row.push_back(text("  URL:   "));
-        url_row.push_back(input_miniflux_url->Render() | flex);
-        rows.push_back(hbox(std::move(url_row)));
-        Elements token_row;
-        token_row.push_back(text("  Token: "));
-        token_row.push_back(input_miniflux_token->Render() | flex);
-        rows.push_back(hbox(std::move(token_row)));
-        rows.push_back(btn_save_miniflux->Render());
-        rows.push_back(separator());
-        rows.push_back(text("Behavior & Memory") | bold);
-        rows.push_back(check_auto_akonadi->Render());
-        rows.push_back(check_auto_miniflux->Render());
-        rows.push_back(check_remember_config->Render());
-        rows.push_back(btn_save_behavior->Render());
-        rows.push_back(separator());
-        rows.push_back(text("Fetching & Stubs") | bold);
-        rows.push_back(check_resolve_stubs->Render());
-        Elements thresh_row;
-        thresh_row.push_back(text("  Threshold: "));
-        thresh_row.push_back(input_stub_threshold->Render() | flex);
-        rows.push_back(hbox(std::move(thresh_row)));
-        Elements delay_row;
-        delay_row.push_back(text("  Delay (ms): "));
-        delay_row.push_back(input_request_delay->Render() | flex);
-        rows.push_back(hbox(std::move(delay_row)));
-        rows.push_back(btn_save_fetching->Render());
-        rows.push_back(check_auto_miniflux->Render());
-        rows.push_back(check_remember_config->Render());
-        rows.push_back(btn_save_behavior->Render());
-        rows.push_back(separator());
-        rows.push_back(text("RSS Options") | bold);
-        Elements max_row;
-        max_row.push_back(text("  Max Articles: "));
-        max_row.push_back(input_rss_max->Render());
-        rows.push_back(hbox(std::move(max_row)));
-        rows.push_back(btn_save_rss->Render());
-        rows.push_back(separator());
-        rows.push_back(text("Search Behavior") | bold);
-        rows.push_back(text(std::string("  Current Mode: ") + (fuzzy_search ? "Fuzzy" : "Regex")));
-        rows.push_back(btn_save_fuzzy->Render());
-        rows.push_back(separator());
-        Elements akonadi_row;
-        akonadi_row.push_back(text("Akonadi Status: "));
-        akonadi_row.push_back(text(fetcher_.is_available() ? "✓ Connected" : "✗ Disconnected") | color(fetcher_.is_available() ? Color::Green : Color::Red));
-        rows.push_back(hbox(std::move(akonadi_row)));
-        rows.push_back(separator());
-        rows.push_back(text("Config File: " + config_.config_file().string()) | dim);
-
-        return vbox(std::move(rows));
+    auto settings_container = Container::Vertical({
+        set_mf_url_input,
+        set_mf_token_input,
+        set_folder_input,
+        set_author_input,
+        set_publisher_input,
+        set_rss_max_input,
+        set_stub_thresh_input,
+        set_delay_input,
+        set_auto_kmail_cb,
+        set_auto_mf_cb,
+        set_cache_cb,
+        set_remember_cb,
+        set_fuzzy_cb,
+        set_stub_cb,
+        Container::Horizontal({set_btn_save, set_btn_refresh_akonadi}),
     });
 
-    // ══════════════════════════════════════════════════════════════════════
-    //  MAIN CONTAINER
-    // ══════════════════════════════════════════════════════════════════════
-
-    std::vector<std::string> tab_labels = {" 📧 KMail ", " 🌀 Miniflux ", " 🌐 RSS ", " 📚 Books ", " 📖 Build ", " ⚙ Settings "};
-    auto tab_toggle = Toggle(&tab_labels, &active_tab);
-    Components tab_comps;
-    tab_comps.push_back(kmail_renderer);
-    tab_comps.push_back(miniflux_renderer);
-    tab_comps.push_back(rss_renderer);
-    tab_comps.push_back(books_renderer);
-    tab_comps.push_back(build_renderer);
-    tab_comps.push_back(settings_renderer);
-    auto tab_content = Container::Tab(tab_comps, &active_tab);
-    
-    int main_sel_main = 0;
-    Components main_main;
-    main_main.push_back(tab_toggle);
-    main_main.push_back(tab_content);
-    auto main_container = Container::Vertical(main_main, &main_sel_main);
-    auto main_component = CatchEvent(main_container, [&](Event event) {
-        int prev_tab = active_tab;
-        bool handled = false;
-        
-        if (main_container->OnEvent(event)) handled = true;
-        else if (event == Event::F1) { active_tab = 0; handled = true; }
-        else if (event == Event::F2) { active_tab = 1; handled = true; }
-        else if (event == Event::F3) { active_tab = 2; handled = true; }
-        else if (event == Event::F4) { active_tab = 3; handled = true; }
-        else if (event == Event::F5) { active_tab = 4; handled = true; }
-        else if (event == Event::F6) { active_tab = 5; handled = true; }
-        else if (event == Event::Character('1')) { active_tab = 0; handled = true; }
-        else if (event == Event::Character('2')) { active_tab = 1; handled = true; }
-        else if (event == Event::Character('3')) { active_tab = 2; handled = true; }
-        else if (event == Event::Character('4')) { active_tab = 3; handled = true; }
-        else if (event == Event::Character('5')) { active_tab = 4; handled = true; }
-        else if (event == Event::Character('6')) { active_tab = 5; handled = true; }
-        else if (event == Event::Character('q') || event == Event::Escape) { screen.Exit(); return true; }
-
-        if (handled && prev_tab != active_tab) {
-            if (active_tab == 0 && auto_fetch_akonadi && folders.empty() && !loading_folders) do_fetch_folders();
-            if (active_tab == 1 && auto_fetch_miniflux && miniflux_categories.empty() && !loading_miniflux_categories) do_fetch_mini_cats();
-        }
-        return handled;
+    auto settings_renderer = Renderer(settings_container, [&]() {
+        return vbox({
+            hbox({text(" Miniflux URL:       ") | bold, set_mf_url_input->Render() | flex}),
+            hbox({text(" Miniflux Token:     ") | bold, set_mf_token_input->Render() | flex}),
+            hbox({text(" Default Output Dir: ") | bold, set_folder_input->Render() | flex}),
+            hbox({text(" Default Author:     ") | bold, set_author_input->Render() | flex}),
+            hbox({text(" Default Publisher:  ") | bold, set_publisher_input->Render() | flex}),
+            hbox({text(" RSS Max Articles:   ") | bold, set_rss_max_input->Render() | size(WIDTH, EQUAL, 12),
+                  text("  (0 = unlimited)") | dim}),
+            hbox({text(" Stub Char Min:      ") | bold, set_stub_thresh_input->Render() | size(WIDTH, EQUAL, 12),
+                  text("  Delay (ms): ") | bold, set_delay_input->Render() | size(WIDTH, EQUAL, 10)}),
+            separator(),
+            set_auto_kmail_cb->Render(),
+            set_auto_mf_cb->Render(),
+            set_cache_cb->Render(),
+            set_remember_cb->Render(),
+            set_fuzzy_cb->Render(),
+            set_stub_cb->Render(),
+            separator(),
+            hbox({
+                set_btn_save->Render(),
+                text("  "),
+                set_btn_refresh_akonadi->Render(),
+                filler(),
+                text(akonadi_available ? "Akonadi: Online " : "Akonadi: Offline ") |
+                    color(akonadi_available ? Color::Green : Color::Red),
+            }),
+        }) | vscroll_indicator | frame | border | flex;
     });
 
-    auto final_renderer = Renderer(main_component, [&] {
-        Elements foot;
-        foot.push_back(text(" Endpaper v0.1 ") | bold | inverted);
-        foot.push_back(text(" "));
-        foot.push_back(text(status_message) | flex);
-        foot.push_back(text(" [q]uit [1-6]tabs ") | dim);
+    // ═════════════════════════════════════════════════════════════════════
+    // MAIN TABS & KEYBOARD DISPATCH
+    // ═════════════════════════════════════════════════════════════════════
+    std::vector<std::string> tab_names = {
+        " [F1] KMail ", " [F2] Miniflux ", " [F3] RSS ",
+        " [F4] Books ", " [F5] Build ", " [F6] Settings "
+    };
 
-        Elements rows;
-        rows.push_back(tab_toggle->Render() | center);
-        rows.push_back(separator());
-        rows.push_back(tab_content->Render() | flex);
-        rows.push_back(separator());
-        rows.push_back(hbox(std::move(foot)));
+    MenuOption tab_mopt = MenuOption::HorizontalAnimated();
+    tab_mopt.entries = &tab_names;
+    tab_mopt.selected = &tab_index;
+    tab_mopt.on_change = [&]() {
+        confirm_action.clear();
+        persist_state("state", "last_page_index", std::to_string(tab_index));
+    };
+    auto tab_menu = Menu(std::move(tab_mopt));
 
-        return vbox(std::move(rows)) | border;
+    auto tab_content = Container::Tab({
+        kmail_renderer,
+        mf_renderer,
+        rss_renderer,
+        books_renderer,
+        build_renderer,
+        settings_renderer,
+    }, &tab_index);
+
+    auto main_container = Container::Vertical({tab_menu, tab_content}, &main_sel_main);
+
+    auto switch_tab = [&](int idx) {
+        tab_index = std::clamp(idx, 0, 5);
+        confirm_action.clear();
+        persist_state("state", "last_page_index", std::to_string(tab_index));
+        main_sel_main = 1;
+        // Take focus into first interactive control of Settings tab immediately
+        tab_content->SetActiveChild(tab_content->ChildAt(tab_index));
+    };
+
+    auto request_quit = [&]() {
+        shutting_down.store(true);
+        worker_pool.request_stop();
+        fetcher_.stop();
+        screen.ExitLoopClosure()();
+    };
+
+    auto main_component = CatchEvent(main_container, [&](Event ev) {
+        if (ev == Event::CtrlQ) {
+            request_quit();
+            return true;
+        }
+        if (ev == Event::F1) { switch_tab(0); return true; }
+        if (ev == Event::F2) { switch_tab(1); return true; }
+        if (ev == Event::F3) { switch_tab(2); return true; }
+        if (ev == Event::F4) { switch_tab(3); return true; }
+        if (ev == Event::F5) { switch_tab(4); return true; }
+        if (ev == Event::F6) { switch_tab(5); return true; }
+
+        if (ev == Event::Escape) {
+            if (main_sel_main == 1) {
+                main_sel_main = 0;
+                confirm_action.clear();
+                return true;
+            }
+            request_quit();
+            return true;
+        }
+
+        if (main_sel_main == 0 || !any_input_focused()) {
+            if (ev == Event::Character('q') || ev == Event::Character('Q')) {
+                request_quit();
+                return true;
+            }
+            if (ev == Event::Character('1')) { switch_tab(0); return true; }
+            if (ev == Event::Character('2')) { switch_tab(1); return true; }
+            if (ev == Event::Character('3')) { switch_tab(2); return true; }
+            if (ev == Event::Character('4')) { switch_tab(3); return true; }
+            if (ev == Event::Character('5')) { switch_tab(4); return true; }
+            if (ev == Event::Character('6')) { switch_tab(5); return true; }
+        }
+
+        return false;
     });
 
-    screen.Loop(final_renderer);
+    auto root_renderer = Renderer(main_component, [&]() {
+        std::string active_book = current_book_title();
+        return vbox({
+            hbox({
+                text(" ENDPAPER ") | bold | inverted,
+                text(" "),
+                tab_menu->Render(),
+                filler(),
+                text(active_book.empty() ? "Book: (none) " : "Book: " + active_book + " ") | dim,
+            }),
+            separator(),
+            tab_content->Render() | flex,
+            separator(),
+            hbox({
+                text(" " + status_msg) | color(status_error ? Color::Red : Color::Green) | flex,
+                text(is_busy() ? " [BUSY] " : " ") | color(Color::Yellow),
+                text(" [Ctrl+Q]uit [F1-F6]tabs [Esc]bar ") | dim,
+            }),
+        });
+    });
 
-    // Save state on exit if enabled
-    if (remember_config) {
-        config_.set("state", "active_tab", std::to_string(active_tab));
-        config_.set("state", "last_miniflux_filter", std::to_string(miniflux_status_filter));
-        if (folder_selected >= 0 && folder_selected < static_cast<int>(folders.size())) {
-            config_.set("state", "last_kmail_folder", folders[folder_selected].full_path);
-        }
-        if (miniflux_category_selected > 0 && miniflux_category_selected - 1 < static_cast<int>(miniflux_categories.size())) {
-            config_.set("state", "last_miniflux_category", miniflux_categories[miniflux_category_selected - 1].title);
-        }
-        if (build_book_selected >= 0 && build_book_selected < static_cast<int>(books.size())) {
-            config_.set("state", "last_build_book", books[build_book_selected].title);
-        }
-        config_.save();
+    // ── Initial load & optional auto-fetch ───────────────────────────────
+    refresh_books();
+    if (auto_fetch_kmail && akonadi_available) {
+        fetch_kmail_folders();
+    } else if (auto_fetch_miniflux && !trim_copy(mf_url_str).empty()) {
+        fetch_mf_categories();
     }
+
+    screen.Loop(root_renderer);
+
+    // Ensure workers stop before local state goes out of scope
+    shutting_down.store(true);
+    worker_pool.request_stop();
+    fetcher_.stop();
+    worker_pool.stop_and_join();
 }
 
 } // namespace endpaper

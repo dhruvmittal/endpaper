@@ -22,4 +22,7 @@ namespace endpaper {
 /// Convert plain text to simple HTML (wrap lines in <p> tags).
 [[nodiscard]] std::string plain_text_to_html(const std::string& text);
 
+/// Ensure XHTML compliance for EPUB (self-close void tags, replace &nbsp; with &#160;).
+[[nodiscard]] std::string ensure_xhtml(const std::string& html);
+
 } // namespace endpaper
