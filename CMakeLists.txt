@@ -8,11 +8,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ── Build Options ──────────────────────────────────────────────────────────
 option(BUILD_TUI "Build TUI application" ON)
-option(BUILD_GUI "Build GUI application (Qt/Kirigami)" ON)
+option(BUILD_GUI "Build GUI application (Qt Widgets)" ON)
 
 # ── Qt6 ────────────────────────────────────────────────────────────────────
 if (BUILD_GUI)
-    find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2)
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 else()
     find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 endif()
@@ -32,9 +32,6 @@ else()
 endif()
 find_package(KPim6Akonadi REQUIRED)
 find_package(KPim6AkonadiMime REQUIRED)
-if (BUILD_GUI)
-    find_package(KF6 REQUIRED COMPONENTS Kirigami I18n)
-endif()
 
 find_package(Threads REQUIRED)
 
@@ -152,37 +149,18 @@ endif()
 
 # ── GUI executable ─────────────────────────────────────────────────────────
 if (BUILD_GUI)
-    qt_add_executable(endpaper-qt
+    add_executable(endpaper-qt
         src/qt_main.cpp
-        src/endpaper_bridge.cpp
-        src/endpaper_bridge.h
-        src/qml_models.h
-    )
-
-    qt_add_resources(endpaper-qt "qml"
-        PREFIX "/org/kde/endpaper/"
-        FILES
-            src/qml/main.qml
-            src/qml/Components/ArticleListView.qml
-            src/qml/Components/BookSelector.qml
-            src/qml/Pages/SettingsPage.qml
-            src/qml/Pages/IngestPage.qml
-            src/qml/Pages/MinifluxPage.qml
-            src/qml/Pages/RssPage.qml
-            src/qml/Pages/BooksPage.qml
-            src/qml/Pages/BuildPage.qml
+        src/main_window.cpp
+        src/main_window.h
+        src/settings_dialog.cpp
+        src/settings_dialog.h
     )
 
     target_link_libraries(endpaper-qt PRIVATE
         endpaper_core
-        Qt6::Qml Qt6::Quick Qt6::QuickControls2
-        KF6::I18n
+        Qt6::Widgets
     )
-
-    if (TARGET KF6::I18nQml)
-        target_link_libraries(endpaper-qt PRIVATE KF6::I18nQml)
-        target_compile_definitions(endpaper-qt PRIVATE ENDPAPER_HAS_I18NQML=1)
-    endif()
 
     target_compile_options(endpaper-qt PRIVATE -Wall -Wextra -Wpedantic)
     install(TARGETS endpaper-qt DESTINATION bin)

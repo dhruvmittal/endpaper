@@ -26,17 +26,6 @@
         kde = pkgs.kdePackages;
         mkFlatpak = nix2flatpak.lib.${system}.mkFlatpak;
 
-        # Kirigami's qmldir files contain 'prefer :/qt/qml/...' directives that
-        # force the QML engine to load from QRC resource paths. When KF6::Kirigami
-        # is linked statically, those resources exist in the binary. On NixOS we
-        # don't link it (it breaks qt6_import_qml_plugins), so we strip the
-        # 'prefer' lines to let the engine use the filesystem paths instead.
-        kirigamiQml = pkgs.runCommand "kirigami-qml-patched" {} ''
-          cp -r ${pkgs.kdePackages.kirigami.unwrapped}/lib/qt-6/qml $out
-          chmod -R u+w $out
-          find $out -name qmldir -exec sed -i -e '/^prefer /d' -e '/^linktarget /d' {} \;
-        '';
-
         mkEndpaper = { pkgs, withGui ? true, withTui ? true }: 
           let
             kde = pkgs.kdePackages;
@@ -71,13 +60,9 @@
               pkgs.curl
               pkgs.nlohmann_json
             ] ++ (with pkgs.lib; optionals withGui [
-              kde.qtdeclarative
               kde.qtsvg
-              kde.kirigami
-              kde.kirigami-addons
-              kde.ki18n
               kde.breeze
-              pkgs.kdePackages.qqc2-breeze-style
+              pkgs.kdePackages.breeze-icons
               kde.plasma-integration
             ]);
 
@@ -100,19 +85,12 @@
               # Wrap GUI if built
               if [ -f $out/bin/endpaper-qt ]; then
                 wrapProgram $out/bin/endpaper-qt \
-                  --set QML_DISABLE_DISK_CACHE "1" \
-                  --prefix QML2_IMPORT_PATH : "${kirigamiQml}" \
-                  --prefix QML2_IMPORT_PATH : "${kde.kirigami-addons}/lib/qt-6/qml" \
-                  --prefix QML2_IMPORT_PATH : "${pkgs.kdePackages.qqc2-breeze-style}/lib/qt-6/qml" \
-                  --prefix QML2_IMPORT_PATH : "${kde.qtdeclarative}/lib/qt-6/qml" \
                   --prefix QT_PLUGIN_PATH : "${kde.qtbase}/lib/qt-6/plugins" \
                   --prefix QT_PLUGIN_PATH : "${kde.plasma-integration}/lib/qt-6/plugins" \
                   --prefix QT_PLUGIN_PATH : "${kde.breeze}/lib/qt-6/plugins" \
-                  --prefix XDG_DATA_DIRS : "${kde.kirigami}/share" \
                   --prefix XDG_DATA_DIRS : "${pkgs.kdePackages.breeze-icons}/share" \
                   --prefix XDG_DATA_DIRS : "$out/share" \
-                  --set QT_QPA_PLATFORMTHEME "kde" \
-                  --set QT_QUICK_CONTROLS_STYLE "org.kde.breeze"
+                  --set QT_QPA_PLATFORMTHEME "kde"
               fi
             '';
           };
@@ -163,12 +141,9 @@
             pkgs.clang-tools
           ];
 
-          QML_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with kde; [ qtdeclarative kirigami-addons pkgs.kdePackages.qqc2-breeze-style ]) + ":${kirigamiQml}";
-          QML2_IMPORT_PATH = pkgs.lib.makeSearchPath "lib/qt-6/qml" (with kde; [ qtdeclarative kirigami-addons pkgs.kdePackages.qqc2-breeze-style ]) + ":${kirigamiQml}";
           QT_PLUGIN_PATH = pkgs.lib.makeSearchPath "lib/qt-6/plugins" (with kde; [ qtbase akonadi-mime plasma-integration breeze ]);
-          XDG_DATA_DIRS = pkgs.lib.makeSearchPath "share" (with kde; [ kirigami breeze-icons ]);
+          XDG_DATA_DIRS = pkgs.lib.makeSearchPath "share" (with kde; [ breeze-icons ]);
           QT_QPA_PLATFORMTHEME = "kde";
-          QT_QUICK_CONTROLS_STYLE = "org.kde.breeze";
 
           shellHook = ''
             echo "🔧 Endpaper dev shell ready"

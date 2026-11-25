@@ -32,3 +32,19 @@ add_executable(test_build_pipeline test_build_pipeline.cpp)
 target_link_libraries(test_build_pipeline PRIVATE endpaper_core)
 target_compile_options(test_build_pipeline PRIVATE -Wall -Wextra)
 add_test(NAME test_build_pipeline COMMAND test_build_pipeline)
+
+if(BUILD_GUI)
+    add_executable(test_qt_widgets
+        test_qt_widgets.cpp
+        ../src/main_window.cpp
+        ../src/main_window.h
+        ../src/settings_dialog.cpp
+        ../src/settings_dialog.h
+    )
+    target_link_libraries(test_qt_widgets PRIVATE endpaper_core Qt6::Widgets)
+    target_compile_options(test_qt_widgets PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME test_qt_widgets COMMAND test_qt_widgets)
+    set_tests_properties(test_qt_widgets PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+endif()
