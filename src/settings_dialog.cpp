@@ -24,7 +24,7 @@ SettingsDialog::SettingsDialog(Config& config, AkonadiFetcher& fetcher, QWidget*
     , m_fetcher(fetcher)
     , m_akonadiAvailable(fetcher.is_available())
 {
-    setWindowTitle("Settings");
+    setWindowTitle("Configure — Endpaper");
     setMinimumWidth(560);
 
     auto* rootLayout = new QVBoxLayout(this);
@@ -44,15 +44,20 @@ SettingsDialog::SettingsDialog(Config& config, AkonadiFetcher& fetcher, QWidget*
     m_mfTokenEdit->setEchoMode(QLineEdit::Password);
     auto* toggleTokenBtn = new QToolButton(this);
     toggleTokenBtn->setText("Show");
+    toggleTokenBtn->setIcon(QIcon::fromTheme("password-show-on"));
+    toggleTokenBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    toggleTokenBtn->setAccessibleName("Show API token");
     toggleTokenBtn->setCheckable(true);
-    toggleTokenBtn->setToolTip("Show / Hide API token");
+    toggleTokenBtn->setToolTip("Show or hide API token");
     connect(toggleTokenBtn, &QToolButton::toggled, this, [this, toggleTokenBtn](bool shown) {
         m_mfTokenEdit->setEchoMode(shown ? QLineEdit::Normal : QLineEdit::Password);
         toggleTokenBtn->setText(shown ? "Hide" : "Show");
+        toggleTokenBtn->setIcon(QIcon::fromTheme(shown ? "password-show-off" : "password-show-on"));
+        toggleTokenBtn->setAccessibleName(shown ? "Hide API token" : "Show API token");
     });
     tokenRow->addWidget(m_mfTokenEdit);
     tokenRow->addWidget(toggleTokenBtn);
-    mfForm->addRow("API Token:", tokenRow);
+    mfForm->addRow("API token:", tokenRow);
 
     rootLayout->addWidget(mfGroup);
 
@@ -61,26 +66,27 @@ SettingsDialog::SettingsDialog(Config& config, AkonadiFetcher& fetcher, QWidget*
     auto* defaultsForm = new QFormLayout(defaultsGroup);
 
     m_authorEdit = new QLineEdit(QString::fromStdString(m_config.get("epub", "author", "Unknown")), this);
-    defaultsForm->addRow("Default Author:", m_authorEdit);
+    defaultsForm->addRow("Default author:", m_authorEdit);
 
     m_publisherEdit = new QLineEdit(QString::fromStdString(m_config.get("epub", "publisher", "Endpaper")), this);
-    defaultsForm->addRow("Default Publisher:", m_publisherEdit);
+    defaultsForm->addRow("Default publisher:", m_publisherEdit);
 
     auto* folderRow = new QHBoxLayout();
     folderRow->setContentsMargins(0, 0, 0, 0);
     m_defaultFolderEdit = new QLineEdit(QString::fromStdString(m_config.get("general", "default_folder", "")), this);
     m_defaultFolderEdit->setPlaceholderText("Default (~/Documents)");
-    auto* browseBtn = new QPushButton("Browse...", this);
+    auto* browseBtn = new QPushButton("&Browse…", this);
+    browseBtn->setIcon(QIcon::fromTheme("folder-open"));
     connect(browseBtn, &QPushButton::clicked, this, &SettingsDialog::browseDefaultFolder);
     folderRow->addWidget(m_defaultFolderEdit);
     folderRow->addWidget(browseBtn);
-    defaultsForm->addRow("Output Folder:", folderRow);
+    defaultsForm->addRow("Output folder:", folderRow);
 
     m_rssMaxSpin = new QSpinBox(this);
     m_rssMaxSpin->setRange(0, 10000);
     m_rssMaxSpin->setSpecialValueText("0 (unlimited)");
     m_rssMaxSpin->setValue(std::clamp(m_config.get_int("rss", "max_articles", 50), 0, 10000));
-    defaultsForm->addRow("RSS Max Articles:", m_rssMaxSpin);
+    defaultsForm->addRow("RSS max articles:", m_rssMaxSpin);
 
     rootLayout->addWidget(defaultsGroup);
 
@@ -143,7 +149,7 @@ SettingsDialog::SettingsDialog(Config& config, AkonadiFetcher& fetcher, QWidget*
     auto* akonadiRow = new QHBoxLayout();
     akonadiRow->setContentsMargins(0, 0, 0, 0);
     m_akonadiLabel = new QLabel(this);
-    auto* refreshAkonadiBtn = new QPushButton("Refresh", this);
+    auto* refreshAkonadiBtn = new QPushButton("&Refresh", this);
     refreshAkonadiBtn->setIcon(QIcon::fromTheme("view-refresh"));
     connect(refreshAkonadiBtn, &QPushButton::clicked, this, &SettingsDialog::refreshAkonadiStatus);
     akonadiRow->addWidget(m_akonadiLabel, 1);
@@ -152,7 +158,7 @@ SettingsDialog::SettingsDialog(Config& config, AkonadiFetcher& fetcher, QWidget*
 
     auto* cfgLabel = new QLabel(QString::fromStdString(m_config.config_file().string()), this);
     cfgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    sysForm->addRow("Config File:", cfgLabel);
+    sysForm->addRow("Configuration file:", cfgLabel);
 
     updateAkonadiLabel();
     rootLayout->addWidget(sysGroup);

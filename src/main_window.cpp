@@ -73,6 +73,33 @@ StubResolver make_resolver(int sourceIndex, ModelPtr mfFetcher, HtmlExtractor* h
     return {};
 }
 
+QString semanticColorStyle(const QPalette& pal, bool isError, bool isPositive) {
+    bool dark = pal.color(QPalette::Window).lightness() < 128;
+    if (isError) {
+        return dark ? QStringLiteral("color: #ff8a80; font-weight: bold;")
+                    : QStringLiteral("color: #b3261e; font-weight: bold;");
+    }
+    if (isPositive) {
+        return dark ? QStringLiteral("color: #7bd88f;")
+                    : QStringLiteral("color: #1b6e3c;");
+    }
+    return {};
+}
+
+QLabel* createViewportPlaceholder(QWidget* viewport) {
+    auto* layout = new QVBoxLayout(viewport);
+    layout->setContentsMargins(16, 16, 16, 16);
+    auto* label = new QLabel(viewport);
+    label->setAlignment(Qt::AlignCenter);
+    label->setWordWrap(true);
+    label->setEnabled(false);
+    label->setAttribute(Qt::WA_TransparentForMouseEvents);
+    layout->addStretch(1);
+    layout->addWidget(label);
+    layout->addStretch(1);
+    return label;
+}
+
 } // namespace
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -345,6 +372,11 @@ MainWindow::MainWindow(Config& config,
     setActiveSource(m_activeSource);
     updateAkonadiFooter();
     setStatus("Ready");
+
+    QListWidget* focusTarget = (m_activeSource == 0) ? m_kmailFolderList
+                             : (m_activeSource == 1) ? m_mfCategoryList
+                                                     : m_rssFeedList;
+    focusTarget->setFocus();
 }
 
 MainWindow::~MainWindow() {
@@ -365,11 +397,11 @@ void MainWindow::setupUi() {
     m_articleProxy->setSourceModel(m_articleModels[0]);
 
     // ── Top Toolbar ──────────────────────────────────────────────────────
-    auto* toolbar = addToolBar("Workspace");
-    toolbar->setObjectName("mainToolbar");
-    toolbar->setMovable(false);
-    toolbar->setFloatable(false);
-    toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_toolBar = addToolBar("Workspace");
+    m_toolBar->setObjectName("mainToolbar");
+    m_toolBar->setMovable(false);
+    m_toolBar->setFloatable(false);
+    m_toolBar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
     m_sourceBtnGroup = new QButtonGroup(this);
     m_sourceBtnGroup->setExclusive(true);
@@ -380,9 +412,9 @@ void MainWindow::setupUi() {
         const char* tip;
     };
     static const SourceMeta kSources[3] = {
-        {"KMail", "mail-folder-inbox", "KMail Folders (F1 / Ctrl+1)"},
-        {"Miniflux", "view-web-browser-dom-tree", "Miniflux Categories (F2 / Ctrl+2)"},
-        {"RSS", "application-rss+xml", "RSS Feeds (F3 / Ctrl+3)"},
+        {"KMail", "mail-folder-inbox", "KMail folders (Ctrl+1, F1)"},
+        {"Miniflux", "view-web-browser-dom-tree", "Miniflux categories (Ctrl+2, F2)"},
+        {"RSS", "application-rss+xml", "RSS feeds (Ctrl+3, F3)"},
     };
     for (int i = 0; i < 3; ++i) {
         auto* btn = new QToolButton(this);
@@ -393,56 +425,63 @@ void MainWindow::setupUi() {
         btn->setCheckable(true);
         btn->setAutoRaise(true);
         m_sourceBtnGroup->addButton(btn, i);
-        toolbar->addWidget(btn);
+        m_toolBar->addWidget(btn);
         m_sourceBtns[i] = btn;
         connect(btn, &QToolButton::clicked, this, [this, i]() { setActiveSource(i); });
     }
 
-    toolbar->addSeparator();
-    toolbar->addWidget(new QLabel(" Book: ", this));
+    auto* spacer = new QWidget(this);
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_toolBar->addWidget(spacer);
+
+    m_settingsBtn = new QToolButton(this);
+    m_settingsBtn->setText("&Settings…");
+    m_settingsBtn->setIcon(QIcon::fromTheme("configure"));
+    m_settingsBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_settingsBtn->setToolTip("Configure Endpaper (Ctrl+,)");
+    connect(m_settingsBtn, &QToolButton::clicked, this, &MainWindow::openSettings);
+    m_toolBar->addWidget(m_settingsBtn);
+
+    m_toolBar->addSeparator();
+    m_toolBar->addWidget(new QLabel(" Book: ", this));
 
     m_bookCombo = new QComboBox(this);
+    m_bookCombo->setAccessibleName("Active book");
+    m_bookCombo->setToolTip("Select active book for staging and EPUB export");
     m_bookCombo->setMinimumContentsLength(22);
     m_bookCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     connect(m_bookCombo, QOverload<int>::of(&QComboBox::activated), this, &MainWindow::onBookActivated);
-    toolbar->addWidget(m_bookCombo);
+    m_toolBar->addWidget(m_bookCombo);
 
     m_newBookBtn = new QToolButton(this);
-    m_newBookBtn->setText("New");
+    m_newBookBtn->setText("Create Book");
+    m_newBookBtn->setAccessibleName("Create new book");
     m_newBookBtn->setIcon(QIcon::fromTheme("document-new"));
     m_newBookBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_newBookBtn->setToolTip("New Book (Ctrl+N)");
+    m_newBookBtn->setToolTip("Create a new book (Ctrl+N)");
     connect(m_newBookBtn, &QToolButton::clicked, this, &MainWindow::createBookInteractive);
-    toolbar->addWidget(m_newBookBtn);
+    m_toolBar->addWidget(m_newBookBtn);
 
     m_delBookBtn = new QToolButton(this);
     m_delBookBtn->setText("Delete Book");
+    m_delBookBtn->setAccessibleName("Delete active book");
     m_delBookBtn->setIcon(QIcon::fromTheme("edit-delete"));
     m_delBookBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_delBookBtn->setToolTip("Delete Active Book");
+    m_delBookBtn->setToolTip("Delete active book");
     connect(m_delBookBtn, &QToolButton::clicked, this, &MainWindow::deleteActiveBookInteractive);
-    toolbar->addWidget(m_delBookBtn);
+    m_toolBar->addWidget(m_delBookBtn);
 
-    auto* spacer = new QWidget(this);
-    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    toolbar->addWidget(spacer);
+    m_toolBar->addSeparator();
 
     m_queueToggleBtn = new QToolButton(this);
-    m_queueToggleBtn->setText("Queue");
-    m_queueToggleBtn->setIcon(QIcon::fromTheme("view-right-new"));
+    m_queueToggleBtn->setText("&Queue");
+    m_queueToggleBtn->setAccessibleName("Toggle book queue sidebar");
+    m_queueToggleBtn->setIcon(QIcon::fromTheme("sidebar-collapse-right"));
     m_queueToggleBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     m_queueToggleBtn->setCheckable(true);
     m_queueToggleBtn->setChecked(true);
-    m_queueToggleBtn->setToolTip("Toggle Book Queue & Build Pane (F4)");
-    toolbar->addWidget(m_queueToggleBtn);
-
-    m_settingsBtn = new QToolButton(this);
-    m_settingsBtn->setText("Settings");
-    m_settingsBtn->setIcon(QIcon::fromTheme("configure"));
-    m_settingsBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    m_settingsBtn->setToolTip("Settings (Ctrl+,)");
-    connect(m_settingsBtn, &QToolButton::clicked, this, &MainWindow::openSettings);
-    toolbar->addWidget(m_settingsBtn);
+    m_queueToggleBtn->setToolTip("Show or hide book queue sidebar (Ctrl+\\, F4)");
+    m_toolBar->addWidget(m_queueToggleBtn);
 
     // ── Central 3-Pane Splitter ──────────────────────────────────────────
     m_splitter = new QSplitter(Qt::Horizontal, this);
@@ -464,8 +503,9 @@ void MainWindow::setupUi() {
     m_refreshSourceBtn = new QToolButton(sourcesPane);
     m_refreshSourceBtn->setIcon(QIcon::fromTheme("view-refresh"));
     m_refreshSourceBtn->setText("Refresh");
+    m_refreshSourceBtn->setAccessibleName("Refresh current source");
     m_refreshSourceBtn->setAutoRaise(true);
-    m_refreshSourceBtn->setToolTip("Refresh current source (F5 / Ctrl+R)");
+    m_refreshSourceBtn->setToolTip("Refresh current source (Ctrl+R, F5)");
     connect(m_refreshSourceBtn, &QToolButton::clicked, this, &MainWindow::refreshCurrentSource);
 
     srcHdrRow->addWidget(m_sourceHeaderLabel, 1);
@@ -520,14 +560,14 @@ void MainWindow::setupUi() {
     rssAddForm->setContentsMargins(0, 2, 0, 2);
     rssAddForm->setSpacing(3);
     m_rssTitleEdit = new QLineEdit(m_rssAddWidget);
-    m_rssTitleEdit->setPlaceholderText("Feed title...");
+    m_rssTitleEdit->setPlaceholderText("Feed title");
     m_rssUrlEdit = new QLineEdit(m_rssAddWidget);
     m_rssUrlEdit->setPlaceholderText("https://example.com/feed.xml");
     connect(m_rssUrlEdit, &QLineEdit::returnPressed, this, &MainWindow::submitRssFeed);
 
     auto* rssAddBtns = new QHBoxLayout();
-    auto* rssConfirmAddBtn = new QPushButton("Add", m_rssAddWidget);
-    auto* rssCancelAddBtn = new QPushButton("Cancel", m_rssAddWidget);
+    auto* rssConfirmAddBtn = new QPushButton("&Add", m_rssAddWidget);
+    auto* rssCancelAddBtn = new QPushButton("&Cancel", m_rssAddWidget);
     connect(rssConfirmAddBtn, &QPushButton::clicked, this, &MainWindow::submitRssFeed);
     connect(rssCancelAddBtn, &QPushButton::clicked, this, [this]() { toggleRssAddBar(false); });
     rssAddBtns->addWidget(rssConfirmAddBtn);
@@ -542,6 +582,7 @@ void MainWindow::setupUi() {
     auto* rssActionRow = new QHBoxLayout();
     m_rssToggleAddBtn = new QToolButton(rssContainer);
     m_rssToggleAddBtn->setText("Add Feed");
+    m_rssToggleAddBtn->setAccessibleName("Add RSS feed");
     m_rssToggleAddBtn->setIcon(QIcon::fromTheme("list-add"));
     m_rssToggleAddBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     m_rssToggleAddBtn->setCheckable(true);
@@ -549,6 +590,7 @@ void MainWindow::setupUi() {
 
     m_rssRemoveBtn = new QToolButton(rssContainer);
     m_rssRemoveBtn->setText("Remove");
+    m_rssRemoveBtn->setAccessibleName("Remove selected RSS feed");
     m_rssRemoveBtn->setIcon(QIcon::fromTheme("list-remove"));
     m_rssRemoveBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     m_rssRemoveBtn->setToolTip("Remove selected RSS feed (Del)");
@@ -595,7 +637,7 @@ void MainWindow::setupUi() {
             onMinifluxFilterChanged();
         });
     }
-    m_mfStarredCheck = new QCheckBox("Starred", m_mfFilterBar);
+    m_mfStarredCheck = new QCheckBox("Sta&rred", m_mfFilterBar);
     connect(m_mfStarredCheck, &QCheckBox::toggled, this, &MainWindow::onMinifluxFilterChanged);
     mfBarLayout->addSpacing(8);
     mfBarLayout->addWidget(m_mfStarredCheck);
@@ -607,7 +649,7 @@ void MainWindow::setupUi() {
     auto* filterRow = new QHBoxLayout();
     filterRow->setSpacing(4);
     m_filterEdit = new QLineEdit(articlesPane);
-    m_filterEdit->setPlaceholderText("Filter articles... (Ctrl+F; Enter searches server on Miniflux)");
+    m_filterEdit->setPlaceholderText("Filter articles (Ctrl+F; press Enter to search Miniflux server)");
     m_filterEdit->setClearButtonEnabled(true);
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
         m_sourceFilters[m_activeSource] = text;
@@ -619,18 +661,20 @@ void MainWindow::setupUi() {
         }
     });
 
-    m_selectAllBtn = new QPushButton("All", articlesPane);
+    m_selectAllBtn = new QPushButton("Select &All", articlesPane);
     m_selectAllBtn->setToolTip("Select all visible articles (Ctrl+A)");
     connect(m_selectAllBtn, &QPushButton::clicked, this, [this]() {
         m_articleModels[m_activeSource]->setRowsSelected(m_articleProxy->visibleSourceRows(), true);
     });
 
-    m_selectNoneBtn = new QPushButton("None", articlesPane);
+    m_selectNoneBtn = new QPushButton("Select &None", articlesPane);
+    m_selectNoneBtn->setToolTip("Clear article selection");
     connect(m_selectNoneBtn, &QPushButton::clicked, this, [this]() {
         m_articleModels[m_activeSource]->setRowsSelected(m_articleProxy->visibleSourceRows(), false);
     });
 
     m_stageBtn = new QPushButton("Stage → (0)", articlesPane);
+    m_stageBtn->setIcon(QIcon::fromTheme("mail-forward"));
     m_stageBtn->setToolTip("Stage checked articles into active book (Ctrl+Enter)");
     connect(m_stageBtn, &QPushButton::clicked, this, &MainWindow::stageSelectedOrHighlighted);
 
@@ -656,9 +700,14 @@ void MainWindow::setupUi() {
     m_articleView->horizontalHeader()->setSectionResizeMode(ArticleTableModel::DateColumn, QHeaderView::ResizeToContents);
     m_articleView->setColumnWidth(ArticleTableModel::AuthorColumn, 150);
     m_articleView->installEventFilter(this);
+    m_articleEmptyLabel = createViewportPlaceholder(m_articleView->viewport());
     connect(m_articleView, &QTableView::doubleClicked, this, &MainWindow::onArticleDoubleClicked);
     connect(m_articleView->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, &MainWindow::updateStageButtonLabel);
+    connect(m_articleProxy, &QAbstractItemModel::rowsInserted, this, &MainWindow::updateEmptyPlaceholders);
+    connect(m_articleProxy, &QAbstractItemModel::rowsRemoved, this, &MainWindow::updateEmptyPlaceholders);
+    connect(m_articleProxy, &QAbstractItemModel::modelReset, this, &MainWindow::updateEmptyPlaceholders);
+    connect(m_articleProxy, &QAbstractItemModel::layoutChanged, this, &MainWindow::updateEmptyPlaceholders);
     articlesLayout->addWidget(m_articleView, 1);
 
     // ── Pane 3: Book Queue & Build ───────────────────────────────────────
@@ -668,26 +717,34 @@ void MainWindow::setupUi() {
     queueLayout->setContentsMargins(4, 6, 6, 6);
     queueLayout->setSpacing(6);
 
-    connect(m_queueToggleBtn, &QToolButton::toggled, m_queuePane, &QWidget::setVisible);
+    connect(m_queueToggleBtn, &QToolButton::toggled, this, [this](bool visible) {
+        m_queuePane->setVisible(visible);
+        m_queueToggleBtn->setIcon(QIcon::fromTheme(
+            visible ? QStringLiteral("sidebar-collapse-right")
+                    : QStringLiteral("sidebar-expand-right")));
+    });
 
     auto* chHdrRow = new QHBoxLayout();
     chHdrRow->setSpacing(2);
     m_chapterHeaderLabel = new QLabel("Chapters (0)", m_queuePane);
     m_chapterHeaderLabel->setFont(hdrFont);
 
-    auto makeChBtn = [this](const char* iconName, const char* tip) {
+    auto makeChBtn = [this](const char* iconName, const char* accessibleName, const char* tip) {
         auto* btn = new QToolButton(m_queuePane);
+        btn->setText(accessibleName);
+        btn->setAccessibleName(accessibleName);
         btn->setIcon(QIcon::fromTheme(iconName));
+        btn->setToolButtonStyle(Qt::ToolButtonIconOnly);
         btn->setToolTip(tip);
         btn->setAutoRaise(true);
         return btn;
     };
-    m_chUpBtn = makeChBtn("go-up", "Move chapter up (Alt+Up)");
-    m_chDownBtn = makeChBtn("go-down", "Move chapter down (Alt+Down)");
-    m_chSortBtn = makeChBtn("view-sort-ascending", "Auto-sort chapters by number/title");
-    m_chReverseBtn = makeChBtn("media-playlist-reverse", "Reverse chapter order");
-    m_chRemoveBtn = makeChBtn("edit-delete", "Remove selected chapter (Del)");
-    m_chClearBtn = makeChBtn("edit-clear-all", "Clear all chapters");
+    m_chUpBtn = makeChBtn("go-up", "Move chapter up", "Move selected chapter up (Alt+Up)");
+    m_chDownBtn = makeChBtn("go-down", "Move chapter down", "Move selected chapter down (Alt+Down)");
+    m_chSortBtn = makeChBtn("view-sort-ascending", "Auto-sort chapters", "Auto-sort chapters by number or title");
+    m_chReverseBtn = makeChBtn("object-flip-vertical", "Reverse chapter order", "Reverse chapter order");
+    m_chRemoveBtn = makeChBtn("edit-delete", "Remove chapter", "Remove selected chapter (Del)");
+    m_chClearBtn = makeChBtn("edit-clear-all", "Clear all chapters", "Clear all chapters");
 
     connect(m_chUpBtn, &QToolButton::clicked, this, [this]() { moveChapterByDelta(-1); });
     connect(m_chDownBtn, &QToolButton::clicked, this, [this]() { moveChapterByDelta(+1); });
@@ -710,6 +767,7 @@ void MainWindow::setupUi() {
     m_chapterList->setDefaultDropAction(Qt::MoveAction);
     m_chapterList->setSelectionMode(QAbstractItemView::SingleSelection);
     m_chapterList->setAlternatingRowColors(true);
+    m_chapterEmptyLabel = createViewportPlaceholder(m_chapterList->viewport());
 
     m_dragSyncTimer = new QTimer(this);
     m_dragSyncTimer->setSingleShot(true);
@@ -745,8 +803,11 @@ void MainWindow::setupUi() {
     m_outputPathEdit = new QLineEdit(buildBox);
     m_outputPathEdit->setClearButtonEnabled(true);
     auto* browseOutBtn = new QToolButton(buildBox);
-    browseOutBtn->setText("...");
-    browseOutBtn->setToolTip("Choose output folder");
+    browseOutBtn->setText("Browse");
+    browseOutBtn->setAccessibleName("Browse output folder");
+    browseOutBtn->setIcon(QIcon::fromTheme("folder-open"));
+    browseOutBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    browseOutBtn->setToolTip("Choose output folder…");
     connect(browseOutBtn, &QToolButton::clicked, this, &MainWindow::browseBuildOutputFolder);
     outRow->addWidget(m_outputPathEdit, 1);
     outRow->addWidget(browseOutBtn);
@@ -757,21 +818,23 @@ void MainWindow::setupUi() {
     buildLayout->addLayout(buildForm);
 
     auto* optsRow = new QHBoxLayout();
-    m_simplifyCheck = new QCheckBox("Simplify", buildBox);
+    m_simplifyCheck = new QCheckBox("&Simplify HTML", buildBox);
+    m_simplifyCheck->setToolTip("Simplify HTML for e-ink reading");
     m_simplifyCheck->setChecked(m_config.get_bool("epub", "simplify", true));
     connect(m_simplifyCheck, &QCheckBox::toggled, this, [this](bool on) {
         m_config.set("epub", "simplify", on ? "true" : "false");
         m_config.save();
     });
 
-    m_keepImagesCheck = new QCheckBox("Images (B&W)", buildBox);
+    m_keepImagesCheck = new QCheckBox("Grayscale &images", buildBox);
+    m_keepImagesCheck->setToolTip("Embed and optimize images as grayscale JPEGs");
     m_keepImagesCheck->setChecked(m_config.get_bool("epub", "keep_images", false));
     connect(m_keepImagesCheck, &QCheckBox::toggled, this, [this](bool on) {
         m_config.set("epub", "keep_images", on ? "true" : "false");
         m_config.save();
     });
 
-    m_appendCheck = new QCheckBox("Append", buildBox);
+    m_appendCheck = new QCheckBox("&Append", buildBox);
     m_appendCheck->setChecked(false);
     m_appendCheck->setToolTip("Append chapters to existing EPUB (this session only)");
 
@@ -781,8 +844,9 @@ void MainWindow::setupUi() {
     optsRow->addStretch();
     buildLayout->addLayout(optsRow);
 
-    m_buildBtn = new QPushButton("Build EPUB (Ctrl+B)", buildBox);
+    m_buildBtn = new QPushButton("Build &EPUB (Ctrl+B)", buildBox);
     m_buildBtn->setIcon(QIcon::fromTheme("run-build"));
+    m_buildBtn->setToolTip("Build EPUB from staged chapters (Ctrl+B)");
     connect(m_buildBtn, &QPushButton::clicked, this, &MainWindow::buildEpubAction);
     buildLayout->addWidget(m_buildBtn);
 
@@ -808,7 +872,9 @@ void MainWindow::setupUi() {
     m_busyBar->setVisible(false);
     statusBar()->addPermanentWidget(m_busyBar);
 
-    auto* hintLabel = new QLabel(" F1-F3 Source | Space Check | Ctrl+Enter Stage | Ctrl+B Build | Ctrl+, Settings ", this);
+    auto* hintLabel = new QLabel(
+        " Ctrl+1–3 Source | Ctrl+F Filter | Space Check | Ctrl+Enter Stage | Ctrl+B Build | Ctrl+, Settings ",
+        this);
     hintLabel->setEnabled(false);
     statusBar()->addPermanentWidget(hintLabel);
 }
@@ -828,6 +894,7 @@ void MainWindow::setupShortcuts() {
     bind(QKeySequence(Qt::CTRL | Qt::Key_3), [this]() { setActiveSource(2); });
 
     bind(QKeySequence(Qt::Key_F4), [this]() { m_queueToggleBtn->toggle(); });
+    bind(QKeySequence(Qt::CTRL | Qt::Key_Backslash), [this]() { m_queueToggleBtn->toggle(); });
     bind(QKeySequence(Qt::Key_F5), [this]() { refreshCurrentSource(); });
     bind(QKeySequence(Qt::CTRL | Qt::Key_R), [this]() { refreshCurrentSource(); });
 
@@ -940,6 +1007,18 @@ void MainWindow::persistInt64(const std::string& section, const std::string& key
     m_config.save();
 }
 
+void MainWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange) {
+        applyStatusStyle();
+        updateAkonadiFooter();
+    }
+}
+
+void MainWindow::applyStatusStyle() {
+    m_statusLabel->setStyleSheet(semanticColorStyle(palette(), m_statusIsError, false));
+}
+
 void MainWindow::setStatus(const QString& msg, bool isError) {
     if (QThread::currentThread() != thread()) {
         QMetaObject::invokeMethod(this, [this, msg, isError]() {
@@ -947,8 +1026,9 @@ void MainWindow::setStatus(const QString& msg, bool isError) {
         }, Qt::QueuedConnection);
         return;
     }
+    m_statusIsError = isError;
     m_statusLabel->setText(msg);
-    m_statusLabel->setStyleSheet(isError ? "color: #e05252; font-weight: bold;" : "");
+    applyStatusStyle();
 }
 
 void MainWindow::setBusy(bool busy) {
@@ -970,7 +1050,43 @@ void MainWindow::setBusy(bool busy) {
 
 void MainWindow::updateAkonadiFooter() {
     m_akonadiStatusLabel->setText(m_akonadiAvailable ? "Akonadi: Online" : "Akonadi: Offline");
-    m_akonadiStatusLabel->setStyleSheet(m_akonadiAvailable ? "color: #2e8b57;" : "color: #e05252;");
+    m_akonadiStatusLabel->setStyleSheet(
+        semanticColorStyle(palette(), !m_akonadiAvailable, m_akonadiAvailable));
+}
+
+void MainWindow::updateEmptyPlaceholders() {
+    int proxyCount = m_articleProxy->rowCount();
+    int sourceCount = m_articleModels[m_activeSource]->rowCount();
+    m_articleEmptyLabel->setVisible(proxyCount == 0);
+    if (proxyCount == 0) {
+        if (sourceCount > 0) {
+            m_articleEmptyLabel->setText("No articles match the current filter");
+        } else if (m_activeSource == 0) {
+            m_articleEmptyLabel->setText("Select a KMail folder on the left to load emails");
+        } else if (m_activeSource == 1) {
+            m_articleEmptyLabel->setText("Select a Miniflux category on the left to load entries");
+        } else {
+            m_articleEmptyLabel->setText("Select an RSS feed on the left to load articles");
+        }
+    }
+
+    bool noChapters = m_chapters.empty();
+    m_chapterEmptyLabel->setVisible(noChapters);
+    if (noChapters) {
+        m_chapterEmptyLabel->setText(
+            m_selectedBookId == -1
+                ? "Create or select a book in the toolbar to stage chapters"
+                : "No chapters staged\nDouble-click an article or press Ctrl+Enter");
+    }
+}
+
+bool MainWindow::confirmDestructive(const QString& title, const QString& text, const QString& actionLabel) {
+    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::NoButton, this);
+    QPushButton* actionBtn = box.addButton(actionLabel, QMessageBox::DestructiveRole);
+    QPushButton* cancelBtn = box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(cancelBtn);
+    box.exec();
+    return box.clickedButton() == actionBtn;
 }
 
 QString MainWindow::currentBookTitle() const {
@@ -1007,6 +1123,7 @@ void MainWindow::setActiveSource(int index) {
     m_articleProxy->setFilterString(m_sourceFilters[m_activeSource]);
 
     updateStageButtonLabel();
+    updateEmptyPlaceholders();
     persistInt("state", "last_page_index", m_activeSource);
     maybeAutoFetchActiveSource();
 }
@@ -1102,7 +1219,7 @@ void MainWindow::fetchFolders() {
     }
 
     setBusy(true);
-    setStatus("Fetching KMail folders...");
+    setStatus("Fetching KMail folders…");
     auto fut = std::make_shared<std::future<std::vector<FolderInfo>>>(m_fetcher.fetch_folders());
     bool shouldCache = cacheMetadata();
 
@@ -1141,7 +1258,7 @@ void MainWindow::fetchEmails(int64_t collectionId) {
     persistInt64("state", "last_kmail_collection_id", collectionId);
 
     setBusy(true);
-    setStatus("Fetching emails...");
+    setStatus("Fetching emails…");
     auto fut = std::make_shared<std::future<std::vector<EmailItem>>>(m_fetcher.fetch_emails(collectionId));
 
     m_workers.launch([this, fut]() {
@@ -1186,7 +1303,7 @@ void MainWindow::fetchMinifluxCategories() {
     m_minifluxFetcher.set_credentials(url, token);
 
     setBusy(true);
-    setStatus("Fetching Miniflux categories...");
+    setStatus("Fetching Miniflux categories…");
     bool shouldCache = cacheMetadata();
 
     m_workers.launch([this, shouldCache]() {
@@ -1235,7 +1352,7 @@ void MainWindow::fetchMinifluxEntries() {
     params.search = m_sourceFilters[1].trimmed().toStdString();
 
     setBusy(true);
-    setStatus("Fetching Miniflux entries...");
+    setStatus("Fetching Miniflux entries…");
 
     m_workers.launch([this, params]() {
         try {
@@ -1287,7 +1404,7 @@ void MainWindow::fetchRssEntries(int64_t feedId) {
 
     size_t maxItems = static_cast<size_t>(std::max(0, m_config.get_int("rss", "max_articles", 50)));
     setBusy(true);
-    setStatus(QString("Fetching RSS: %1...").arg(QString::fromStdString(title)));
+    setStatus(QString("Fetching RSS: %1…").arg(QString::fromStdString(title)));
 
     m_workers.launch([this, url, maxItems]() {
         try {
@@ -1355,11 +1472,12 @@ void MainWindow::removeSelectedRssFeed() {
     if (!item) return;
 
     int64_t feedId = item->data(Qt::UserRole).toLongLong();
-    auto answer = QMessageBox::question(
-        this,
-        "Remove RSS Feed",
-        QString("Remove \"%1\" from your saved feeds?").arg(item->text()));
-    if (answer != QMessageBox::Yes) return;
+    if (!confirmDestructive(
+            "Remove RSS Feed",
+            QString("Remove \"%1\" from your saved feeds?").arg(item->text()),
+            "Remove Feed")) {
+        return;
+    }
 
     m_db.delete_rss_feed(feedId);
     if (m_lastRssFeedId == feedId) {
@@ -1425,7 +1543,7 @@ void MainWindow::stageItems(int sourceIndex, std::vector<StageItem> items) {
     QString bookTitle = currentBookTitle();
 
     setBusy(true);
-    setStatus(QString("Staging %1 article(s) into \"%2\"...").arg(items.size()).arg(bookTitle));
+    setStatus(QString("Staging %1 article(s) into \"%2\"…").arg(items.size()).arg(bookTitle));
 
     m_workers.launch([this, bookId, bookTitle, items = std::move(items),
                       opts, resolver = std::move(resolver)]() mutable {
@@ -1522,6 +1640,7 @@ void MainWindow::refreshChapters() {
 
     m_rebuildingChapters = false;
     m_chapterHeaderLabel->setText(QString("Chapters (%1)").arg(m_chapters.size()));
+    updateEmptyPlaceholders();
     updateBookControlsState();
     updateChapterButtonsState();
 }
@@ -1562,11 +1681,12 @@ void MainWindow::createBookInteractive() {
 void MainWindow::deleteActiveBookInteractive() {
     if (m_busy || m_selectedBookId == -1) return;
     QString title = currentBookTitle();
-    auto answer = QMessageBox::question(
-        this,
-        "Delete Book",
-        QString("Delete \"%1\" and all %2 chapter(s)?").arg(title).arg(m_chapters.size()));
-    if (answer != QMessageBox::Yes) return;
+    if (!confirmDestructive(
+            "Delete Book",
+            QString("Delete \"%1\" and all %2 chapter(s)?").arg(title).arg(m_chapters.size()),
+            "Delete Book")) {
+        return;
+    }
 
     m_db.delete_book(m_selectedBookId);
     m_selectedBookId = -1;
@@ -1620,11 +1740,12 @@ void MainWindow::reverseChapterOrder() {
 
 void MainWindow::clearAllChaptersInteractive() {
     if (m_busy || m_selectedBookId == -1 || m_chapters.empty()) return;
-    auto answer = QMessageBox::question(
-        this,
-        "Clear All Chapters",
-        QString("Remove all staged chapters from \"%1\"?").arg(currentBookTitle()));
-    if (answer != QMessageBox::Yes) return;
+    if (!confirmDestructive(
+            "Clear All Chapters",
+            QString("Remove all staged chapters from \"%1\"?").arg(currentBookTitle()),
+            "Clear All Chapters")) {
+        return;
+    }
 
     m_db.delete_all_chapters(m_selectedBookId);
     refreshBooks();
@@ -1675,7 +1796,7 @@ void MainWindow::updateChapterButtonsState() {
 void MainWindow::updateOutputPlaceholder() {
     QString title = currentBookTitle();
     if (title.isEmpty()) {
-        m_outputPathEdit->setPlaceholderText("Select or create a book...");
+        m_outputPathEdit->setPlaceholderText("Select or create a book");
         return;
     }
     std::string defaultFolder = m_config.get("general", "default_folder", "");
@@ -1713,7 +1834,7 @@ void MainWindow::buildEpubAction() {
     opts.keep_images = m_keepImagesCheck->isChecked();
 
     setBusy(true);
-    setStatus(QString("Building EPUB: %1...").arg(QString::fromStdString(bookTitle)));
+    setStatus(QString("Building EPUB: %1…").arg(QString::fromStdString(bookTitle)));
 
     m_workers.launch([this, bookTitle, chapters = std::move(chapters), opts]() {
         try {

@@ -28,6 +28,7 @@ class QSplitter;
 class QStackedWidget;
 class QTableView;
 class QTimer;
+class QToolBar;
 class QToolButton;
 class QWidget;
 
@@ -137,6 +138,12 @@ public:
     [[nodiscard]] QListWidget* chapterList() const { return m_chapterList; }
     [[nodiscard]] QListWidget* rssFeedList() const { return m_rssFeedList; }
     [[nodiscard]] QLineEdit* filterEdit() const { return m_filterEdit; }
+    [[nodiscard]] QToolBar* mainToolBar() const { return m_toolBar; }
+    [[nodiscard]] QComboBox* bookCombo() const { return m_bookCombo; }
+    [[nodiscard]] QToolButton* queueToggleButton() const { return m_queueToggleBtn; }
+    [[nodiscard]] QWidget* queuePane() const { return m_queuePane; }
+    [[nodiscard]] QLabel* articleEmptyLabel() const { return m_articleEmptyLabel; }
+    [[nodiscard]] QLabel* chapterEmptyLabel() const { return m_chapterEmptyLabel; }
 
     void setActiveSource(int index);
     void refreshBooks();
@@ -149,6 +156,7 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private slots:
     void createBookInteractive();
@@ -191,9 +199,12 @@ private:
 
     void setStatus(const QString& msg, bool isError = false);
     void setBusy(bool busy);
+    void applyStatusStyle();
     void updateAkonadiFooter();
+    void updateEmptyPlaceholders();
     void updateBookControlsState();
     void updateChapterButtonsState();
+    bool confirmDestructive(const QString& title, const QString& text, const QString& actionLabel);
     void persistInt(const std::string& section, const std::string& key, int value);
     void persistInt64(const std::string& section, const std::string& key, int64_t value);
 
@@ -214,6 +225,7 @@ private:
     WorkerPool m_workers;
 
     bool m_busy = false;
+    bool m_statusIsError = false;
     bool m_akonadiAvailable = false;
     bool m_kmailAutoFetched = false;
     bool m_minifluxAutoFetched = false;
@@ -232,6 +244,7 @@ private:
     std::vector<RssFeed> m_rssFeeds;
 
     // Toolbar
+    QToolBar* m_toolBar = nullptr;
     QButtonGroup* m_sourceBtnGroup = nullptr;
     std::array<QToolButton*, 3> m_sourceBtns{nullptr, nullptr, nullptr};
     QComboBox* m_bookCombo = nullptr;
@@ -265,6 +278,7 @@ private:
     QPushButton* m_selectNoneBtn = nullptr;
     QPushButton* m_stageBtn = nullptr;
     QTableView* m_articleView = nullptr;
+    QLabel* m_articleEmptyLabel = nullptr;
 
     std::array<ArticleTableModel*, 3> m_articleModels{nullptr, nullptr, nullptr};
     std::array<QString, 3> m_sourceFilters;
@@ -280,6 +294,7 @@ private:
     QToolButton* m_chRemoveBtn = nullptr;
     QToolButton* m_chClearBtn = nullptr;
     QListWidget* m_chapterList = nullptr;
+    QLabel* m_chapterEmptyLabel = nullptr;
 
     QLineEdit* m_authorEdit = nullptr;
     QLineEdit* m_publisherEdit = nullptr;

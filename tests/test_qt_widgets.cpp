@@ -8,10 +8,14 @@
 #include "settings_dialog.h"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QTableView>
+#include <QToolBar>
+#include <QToolButton>
 
 #include <cassert>
 #include <cstdlib>
@@ -91,17 +95,40 @@ int main(int argc, char* argv[]) {
     window.show();
     QApplication::processEvents();
 
+    // ── Toolbar Layout & Queue Toggle ────────────────────────────────────
+    QToolBar* tb = window.mainToolBar();
+    QToolButton* queueBtn = window.queueToggleButton();
+    QComboBox* bookCombo = window.bookCombo();
+    assert(tb && queueBtn && bookCombo);
+    assert(bookCombo->x() + bookCombo->width() < queueBtn->x());
+    for (QObject* child : tb->children()) {
+        if (auto* w = qobject_cast<QWidget*>(child); w && w != queueBtn && w->isVisibleTo(tb)) {
+            assert(w->x() <= queueBtn->x());
+        }
+    }
+    assert(window.queuePane()->isVisible());
+    queueBtn->click();
+    QApplication::processEvents();
+    assert(!window.queuePane()->isVisible());
+    queueBtn->click();
+    QApplication::processEvents();
+    assert(window.queuePane()->isVisible());
+
     // ── Book & Chapter Operations ────────────────────────────────────────
     assert(window.createBookByTitle("Widget Test Book"));
     int64_t bid = window.selectedBookId();
     assert(bid > 0);
     assert(window.chapterCount() == 0);
+    QApplication::processEvents();
+    assert(window.chapterEmptyLabel()->isVisible());
 
     db.add_chapter(bid, "Part 10: Ten", "Alice", "<p>10</p>", 1);
     db.add_chapter(bid, "Part 2: Two", "Bob", "<p>2</p>", 2);
     db.add_chapter(bid, "Part 1: One", "Carol", "<p>1</p>", 3);
     window.refreshBooks();
     assert(window.chapterCount() == 3);
+    QApplication::processEvents();
+    assert(!window.chapterEmptyLabel()->isVisible());
 
     window.chapterList()->setCurrentRow(0);
     assert(window.moveChapterByDelta(+1));
@@ -145,6 +172,8 @@ int main(int argc, char* argv[]) {
     // ── Source Switching & Per-Source Filtering / Selection ───────────────
     window.setActiveSource(0);
     assert(window.activeSource() == 0);
+    QApplication::processEvents();
+    assert(window.articleEmptyLabel()->isVisible());
     window.filterEdit()->setText("rust");
 
     std::vector<ArticleRow> emailRows = {
@@ -154,6 +183,14 @@ int main(int argc, char* argv[]) {
     };
     window.articleModel(0)->setArticles(emailRows);
     assert(window.articleProxy()->rowCount() == 2);
+    assert(!window.articleEmptyLabel()->isVisible());
+
+    window.filterEdit()->setText("zzzz_no_match");
+    assert(window.articleProxy()->rowCount() == 0);
+    assert(window.articleEmptyLabel()->isVisible());
+    assert(window.articleEmptyLabel()->text().contains("filter", Qt::CaseInsensitive));
+    window.filterEdit()->setText("rust");
+    assert(!window.articleEmptyLabel()->isVisible());
 
     // Space key toggles highlighted row via MainWindow event filter
     window.articleView()->selectRow(0);
