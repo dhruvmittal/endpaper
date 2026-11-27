@@ -1,4 +1,6 @@
+#include "akonadi_fetcher.h"
 #include "database.h"
+#include <sqlite3.h>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -150,6 +152,83 @@ void test_list_books_chapter_count_and_move_chapter() {
     assert(chs[0].subject == "A" && chs[1].subject == "B" && chs[2].subject == "C");
 }
 
+void test_folder_hierarchy_migration_and_prefs() {
+    // 1. Path resolution + dangling parent + cycle guard + system folder classification
+    std::vector<FolderInfo> raw = {
+        {10, -1, "IMAP (user@gmail.com)", ""},
+        {11, 10, "Newsletters", ""},
+        {12, 11, "Tech", ""},
+        {13, 999, "Orphan", ""},     // dangling parent -> root
+        {20, 21, "CycleA", ""},     // cycle -> must terminate cleanly
+        {21, 20, "CycleB", ""},
+    };
+    populate_folder_paths(raw);
+    assert(raw[0].full_path == "IMAP (user@gmail.com)");
+    assert(raw[1].full_path == "IMAP (user@gmail.com)/Newsletters");
+    assert(raw[2].full_path == "IMAP (user@gmail.com)/Newsletters/Tech");
+    assert(raw[3].parent_id == -1 && raw[3].full_path == "Orphan");
+    assert(!raw[4].full_path.empty() && !raw[5].full_path.empty());
+
+    assert(is_system_mail_folder("Trash"));
+    assert(is_system_mail_folder("  sent-mail  "));
+    assert(is_system_mail_folder("Drafts"));
+    assert(is_system_mail_folder("Junk E-mail"));
+    assert(!is_system_mail_folder("Inbox"));
+    assert(!is_system_mail_folder("Newsletters"));
+
+    // 2. Legacy folder_cache schema without parent_id migrates safely
+    {
+        sqlite3* raw_db = nullptr;
+        assert(sqlite3_open(TEST_DB.c_str(), &raw_db) == SQLITE_OK);
+        const char* legacy_sql =
+            "CREATE TABLE folder_cache ("
+            "  collection_id INTEGER PRIMARY KEY,"
+            "  name TEXT NOT NULL,"
+            "  full_path TEXT NOT NULL"
+            ");"
+            "INSERT INTO folder_cache (collection_id, name, full_path) "
+            "VALUES (1, 'Legacy', 'Legacy');";
+        assert(sqlite3_exec(raw_db, legacy_sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw_db);
+    }
+
+    Database db(TEST_DB);
+    db.init();
+    auto migrated = db.load_folder_cache();
+    assert(migrated.size() == 1 && migrated[0].parent_id == -1 && migrated[0].name == "Legacy");
+
+    // 3. Save & reload with parent_id + folder_prefs persistence
+    db.save_folder_cache({
+        {10, -1, "IMAP (user@gmail.com)", "IMAP (user@gmail.com)"},
+        {11, 10, "Newsletters", "IMAP (user@gmail.com)/Newsletters"},
+        {12, 10, "Trash", "IMAP (user@gmail.com)/Trash"},
+    });
+    auto reloaded = db.load_folder_cache();
+    assert(reloaded.size() == 3);
+
+    db.set_folder_pinned(11, true);
+    db.set_folder_pinned(12, true);
+    FolderPrefs p = db.load_folder_prefs();
+    assert(p.pinned.count(11) == 1 && p.pinned.count(12) == 1);
+
+    // Hiding a folder clears its pinned bit automatically
+    db.set_folders_hidden({12}, true);
+    p = db.load_folder_prefs();
+    assert(p.hidden.count(12) == 1 && p.pinned.count(12) == 0 && p.pinned.count(11) == 1);
+
+    // Replacing hidden folders preserves existing pins on non-hidden items
+    db.replace_hidden_folders({10, 11});
+    p = db.load_folder_prefs();
+    assert(p.hidden.count(10) == 1 && p.hidden.count(11) == 1 && p.hidden.count(12) == 0);
+    assert(p.pinned.count(11) == 0);
+
+    db.set_folder_pinned(11, true);
+    db.replace_hidden_folders({12});
+    p = db.load_folder_prefs();
+    assert(p.hidden.count(12) == 1 && p.hidden.count(11) == 0);
+    assert(p.pinned.count(11) == 1);
+}
+
 int main() {
     std::cout << "╔════════════════════════════════════════════════════╗\n";
     std::cout << "║  Endpaper — Database Books Tests                   ║\n";
@@ -163,6 +242,8 @@ int main() {
     TEST(test_auto_sort_and_clear_and_count);
     setup(); // reset
     TEST(test_list_books_chapter_count_and_move_chapter);
+    setup(); // reset
+    TEST(test_folder_hierarchy_migration_and_prefs);
     teardown();
 
     std::cout << "\n✓ All database books tests passed!\n";

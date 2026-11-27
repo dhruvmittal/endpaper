@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include "akonadi_fetcher.h"
 #include "miniflux_fetcher.h"
@@ -33,6 +34,11 @@ struct Chapter {
     std::string sender;
     std::string content_html;
     int sort_order;
+};
+
+struct FolderPrefs {
+    std::unordered_set<int64_t> hidden;
+    std::unordered_set<int64_t> pinned;
 };
 
 /// RAII SQLite database wrapper for the Endpaper library.
@@ -73,9 +79,15 @@ public:
     [[nodiscard]] std::vector<RssFeed> list_rss_feeds();
     void delete_rss_feed(int64_t feed_id);
 
-    // ── Cache operations ────────────────────────────────────────────────
+    // ── Cache & folder preference operations ─────────────────────────────
     void save_folder_cache(const std::vector<FolderInfo>& folders);
     [[nodiscard]] std::vector<FolderInfo> load_folder_cache();
+
+    [[nodiscard]] FolderPrefs load_folder_prefs();
+    void set_folder_hidden(int64_t collection_id, bool hidden);
+    void set_folders_hidden(const std::vector<int64_t>& collection_ids, bool hidden);
+    void replace_hidden_folders(const std::unordered_set<int64_t>& hidden_ids);
+    void set_folder_pinned(int64_t collection_id, bool pinned);
 
     void save_category_cache(const std::vector<MinifluxCategory>& categories);
     [[nodiscard]] std::vector<MinifluxCategory> load_category_cache();

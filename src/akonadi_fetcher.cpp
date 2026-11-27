@@ -14,10 +14,14 @@
 #include <QObject>
 #include <QThread>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace endpaper {
 
@@ -130,6 +134,66 @@ bool AkonadiFetcher::is_available() const {
 
 // ── Fetch folders ─────────────────────────────────────────────────────────
 
+void populate_folder_paths(std::vector<FolderInfo>& folders) {
+    std::unordered_map<int64_t, size_t> by_id;
+    by_id.reserve(folders.size());
+    for (size_t i = 0; i < folders.size(); ++i) {
+        by_id.emplace(folders[i].collection_id, i);
+    }
+
+    for (auto& f : folders) {
+        if (f.parent_id == f.collection_id || by_id.find(f.parent_id) == by_id.end()) {
+            f.parent_id = -1;
+        }
+    }
+
+    for (size_t i = 0; i < folders.size(); ++i) {
+        std::vector<std::string> parts;
+        std::vector<int64_t> seen;
+        const FolderInfo* cur = &folders[i];
+
+        for (int depth = 0; depth < 32; ++depth) {
+            if (!cur->name.empty()) {
+                parts.push_back(cur->name);
+            }
+            seen.push_back(cur->collection_id);
+            if (cur->parent_id == -1) break;
+            if (std::find(seen.begin(), seen.end(), cur->parent_id) != seen.end()) break;
+            auto it = by_id.find(cur->parent_id);
+            if (it == by_id.end()) break;
+            cur = &folders[it->second];
+        }
+
+        std::string full;
+        for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+            if (!full.empty()) full += '/';
+            full += *it;
+        }
+        folders[i].full_path = full.empty() ? folders[i].name : std::move(full);
+    }
+}
+
+bool is_system_mail_folder(const std::string& name) {
+    size_t a = 0;
+    while (a < name.size() && std::isspace(static_cast<unsigned char>(name[a]))) ++a;
+    size_t b = name.size();
+    while (b > a && std::isspace(static_cast<unsigned char>(name[b - 1]))) --b;
+
+    std::string lower;
+    lower.reserve(b - a);
+    for (size_t i = a; i < b; ++i) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(name[i]))));
+    }
+
+    static const std::unordered_set<std::string> kSystemFolders = {
+        "trash", "bin", "deleted", "deleted items", "deleted messages",
+        "sent", "sent-mail", "sent mail", "sent items", "sent messages",
+        "drafts", "draft", "outbox", "templates",
+        "junk", "junk email", "junk e-mail", "spam", "bulk mail"
+    };
+    return kSystemFolders.find(lower) != kSystemFolders.end();
+}
+
 std::future<std::vector<FolderInfo>> AkonadiFetcher::fetch_folders() {
     if (!is_available()) {
         return make_error_future<std::vector<FolderInfo>>(
@@ -167,18 +231,17 @@ std::future<std::vector<FolderInfo>> AkonadiFetcher::fetch_folders() {
                 for (const auto& col : collections) {
                     FolderInfo fi;
                     fi.collection_id = col.id();
-                    fi.name = col.displayName().toStdString();
+                    QString disp = col.displayName().trimmed();
+                    if (disp.isEmpty()) disp = col.name().trimmed();
+                    fi.name = disp.toStdString();
 
-                    std::string path = fi.name;
                     auto parent = col.parentCollection();
-                    while (parent.isValid() &&
-                           parent != Akonadi::Collection::root()) {
-                        path = parent.displayName().toStdString() + "/" + path;
-                        parent = parent.parentCollection();
-                    }
-                    fi.full_path = path;
+                    fi.parent_id = (parent.isValid() && parent != Akonadi::Collection::root())
+                        ? parent.id()
+                        : -1;
                     folders.push_back(std::move(fi));
                 }
+                populate_folder_paths(folders);
                 prom->set_value(std::move(folders));
             } catch (...) {
                 prom->set_exception(std::current_exception());

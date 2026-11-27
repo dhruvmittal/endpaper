@@ -16,6 +16,7 @@
 #include <QTableView>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTreeWidget>
 
 #include <cassert>
 #include <cstdlib>
@@ -219,9 +220,60 @@ int main(int argc, char* argv[]) {
     window.setActiveSource(1);
     assert(window.filterEdit()->text() == "mf_query");
 
+    // ── KMail Folder Tree, Pinned Group & Visibility Dialog ───────────────
+    std::vector<FolderInfo> testFolders = {
+        {1, -1, "Local Folders", "Local Folders"},
+        {2, 1, "inbox", "Local Folders/inbox"},
+        {3, 1, "trash", "Local Folders/trash"},
+        {10, -1, "IMAP (me)", "IMAP (me)"},
+        {11, 10, "Inbox", "IMAP (me)/Inbox"},
+        {12, 10, "Newsletters", "IMAP (me)/Newsletters"},
+        {13, 12, "Tech", "IMAP (me)/Newsletters/Tech"},
+        {14, 10, "Drafts", "IMAP (me)/Drafts"},
+    };
+    db.save_folder_cache(testFolders);
+    window.reloadKMailFolders();
+    QApplication::processEvents();
+
+    QTreeWidget* kmailTree = window.kmailFolderTree();
+    assert(kmailTree);
+    assert(kmailTree->topLevelItemCount() == 2); // 2 accounts, collapsed by default
+    assert(!kmailTree->topLevelItem(0)->isExpanded());
+    assert(!kmailTree->topLevelItem(1)->isExpanded());
+
+    // Pin Newsletters (12) -> "Pinned" section appears first with Newsletters child
+    window.setFolderPinned(12, true);
+    assert(kmailTree->topLevelItemCount() == 3);
+    assert(kmailTree->topLevelItem(0)->text(0) == "Pinned");
+    assert(kmailTree->topLevelItem(0)->childCount() == 1);
+    assert(kmailTree->topLevelItem(0)->child(0)->data(0, Qt::UserRole).toLongLong() == 12);
+    assert(db.load_folder_prefs().pinned.count(12) == 1);
+
+    // Hide Local Folders (1) -> account and children disappear and persist as hidden
+    window.hideFolderSubtree(1);
+    assert(kmailTree->topLevelItemCount() == 2); // Pinned + IMAP (me)
+    {
+        auto prefs = db.load_folder_prefs();
+        assert(prefs.hidden.count(1) == 1 && prefs.hidden.count(2) == 1 && prefs.hidden.count(3) == 1);
+    }
+
+    // FolderVisibilityDialog: hideSystemFolders marks Drafts (14) hidden while keeping Inbox (11)/Newsletters (12)
+    {
+        FolderVisibilityDialog visDlg(db, testFolders, &window);
+        visDlg.hideSystemFolders();
+        visDlg.saveAndAccept();
+        auto prefs = db.load_folder_prefs();
+        assert(prefs.hidden.count(14) == 1);
+        assert(prefs.hidden.count(11) == 0);
+        assert(prefs.hidden.count(12) == 0);
+        assert(prefs.pinned.count(12) == 1);
+    }
+    window.reloadKMailFolders();
+    assert(kmailTree->topLevelItemCount() == 2); // Pinned + IMAP (me)
+
     // ── SettingsDialog Instantiation ─────────────────────────────────────
     {
-        SettingsDialog dlg(config, fetcher, &window);
+        SettingsDialog dlg(config, db, fetcher, testFolders, &window);
         QApplication::processEvents();
     }
 

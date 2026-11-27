@@ -92,8 +92,33 @@ void Database::init() {
     exec(R"(
         CREATE TABLE IF NOT EXISTS folder_cache (
             collection_id INTEGER PRIMARY KEY,
+            parent_id     INTEGER NOT NULL DEFAULT -1,
             name          TEXT NOT NULL,
             full_path     TEXT NOT NULL
+        );
+    )");
+
+    // Migrate legacy folder_cache schemas lacking parent_id
+    {
+        StmtGuard sg;
+        check(sqlite3_prepare_v2(db_, "PRAGMA table_info(folder_cache);", -1, &sg.stmt, nullptr), db_, "prepare");
+        bool has_parent_id = false;
+        while (sqlite3_step(sg.stmt) == SQLITE_ROW) {
+            if (col_text(sg.stmt, 1) == "parent_id") {
+                has_parent_id = true;
+                break;
+            }
+        }
+        if (!has_parent_id) {
+            exec("ALTER TABLE folder_cache ADD COLUMN parent_id INTEGER NOT NULL DEFAULT -1;");
+        }
+    }
+
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS folder_prefs (
+            collection_id INTEGER PRIMARY KEY,
+            hidden        INTEGER NOT NULL DEFAULT 0,
+            pinned        INTEGER NOT NULL DEFAULT 0
         );
     )");
 
@@ -423,14 +448,16 @@ void Database::save_folder_cache(const std::vector<FolderInfo>& folders) {
     exec("BEGIN TRANSACTION;");
     try {
         exec("DELETE FROM folder_cache;");
-        const char* sql = "INSERT INTO folder_cache (collection_id, name, full_path) VALUES (?, ?, ?);";
+        const char* sql =
+            "INSERT INTO folder_cache (collection_id, parent_id, name, full_path) VALUES (?, ?, ?, ?);";
         StmtGuard sg;
         check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
 
         for (const auto& f : folders) {
             sqlite3_bind_int64(sg.stmt, 1, f.collection_id);
-            sqlite3_bind_text(sg.stmt, 2, f.name.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(sg.stmt, 3, f.full_path.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(sg.stmt, 2, f.parent_id);
+            sqlite3_bind_text(sg.stmt, 3, f.name.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(sg.stmt, 4, f.full_path.c_str(), -1, SQLITE_TRANSIENT);
             check(sqlite3_step(sg.stmt), db_, "step");
             sqlite3_reset(sg.stmt);
         }
@@ -443,7 +470,9 @@ void Database::save_folder_cache(const std::vector<FolderInfo>& folders) {
 
 std::vector<FolderInfo> Database::load_folder_cache() {
     std::lock_guard<std::recursive_mutex> lock(mu_);
-    const char* sql = "SELECT collection_id, name, full_path FROM folder_cache ORDER BY full_path;";
+    const char* sql =
+        "SELECT collection_id, parent_id, name, full_path FROM folder_cache "
+        "ORDER BY full_path COLLATE NOCASE;";
     StmtGuard sg;
     check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
 
@@ -451,11 +480,99 @@ std::vector<FolderInfo> Database::load_folder_cache() {
     while (sqlite3_step(sg.stmt) == SQLITE_ROW) {
         FolderInfo f;
         f.collection_id = sqlite3_column_int64(sg.stmt, 0);
-        f.name = col_text(sg.stmt, 1);
-        f.full_path = col_text(sg.stmt, 2);
+        f.parent_id = sqlite3_column_int64(sg.stmt, 1);
+        f.name = col_text(sg.stmt, 2);
+        f.full_path = col_text(sg.stmt, 3);
         folders.push_back(std::move(f));
     }
     return folders;
+}
+
+FolderPrefs Database::load_folder_prefs() {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    const char* sql = "SELECT collection_id, hidden, pinned FROM folder_prefs;";
+    StmtGuard sg;
+    check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+
+    FolderPrefs prefs;
+    while (sqlite3_step(sg.stmt) == SQLITE_ROW) {
+        int64_t cid = sqlite3_column_int64(sg.stmt, 0);
+        if (sqlite3_column_int(sg.stmt, 1) != 0) prefs.hidden.insert(cid);
+        if (sqlite3_column_int(sg.stmt, 2) != 0) prefs.pinned.insert(cid);
+    }
+    return prefs;
+}
+
+void Database::set_folder_hidden(int64_t collection_id, bool hidden) {
+    set_folders_hidden({collection_id}, hidden);
+}
+
+void Database::set_folders_hidden(const std::vector<int64_t>& collection_ids, bool hidden) {
+    if (collection_ids.empty()) return;
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    exec("BEGIN TRANSACTION;");
+    try {
+        const char* sql = hidden
+            ? "INSERT INTO folder_prefs (collection_id, hidden, pinned) VALUES (?, 1, 0) "
+              "ON CONFLICT(collection_id) DO UPDATE SET hidden = 1, pinned = 0;"
+            : "INSERT INTO folder_prefs (collection_id, hidden, pinned) VALUES (?, 0, 0) "
+              "ON CONFLICT(collection_id) DO UPDATE SET hidden = 0;";
+        StmtGuard sg;
+        check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+        for (int64_t cid : collection_ids) {
+            sqlite3_bind_int64(sg.stmt, 1, cid);
+            check(sqlite3_step(sg.stmt), db_, "step");
+            sqlite3_reset(sg.stmt);
+        }
+        exec("DELETE FROM folder_prefs WHERE hidden = 0 AND pinned = 0;");
+        exec("COMMIT;");
+    } catch (...) {
+        try { exec("ROLLBACK;"); } catch (...) {}
+        throw;
+    }
+}
+
+void Database::replace_hidden_folders(const std::unordered_set<int64_t>& hidden_ids) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    exec("BEGIN TRANSACTION;");
+    try {
+        exec("UPDATE folder_prefs SET hidden = 0;");
+        const char* sql =
+            "INSERT INTO folder_prefs (collection_id, hidden, pinned) VALUES (?, 1, 0) "
+            "ON CONFLICT(collection_id) DO UPDATE SET hidden = 1, pinned = 0;";
+        StmtGuard sg;
+        check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+        for (int64_t cid : hidden_ids) {
+            sqlite3_bind_int64(sg.stmt, 1, cid);
+            check(sqlite3_step(sg.stmt), db_, "step");
+            sqlite3_reset(sg.stmt);
+        }
+        exec("DELETE FROM folder_prefs WHERE hidden = 0 AND pinned = 0;");
+        exec("COMMIT;");
+    } catch (...) {
+        try { exec("ROLLBACK;"); } catch (...) {}
+        throw;
+    }
+}
+
+void Database::set_folder_pinned(int64_t collection_id, bool pinned) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    exec("BEGIN TRANSACTION;");
+    try {
+        const char* sql =
+            "INSERT INTO folder_prefs (collection_id, hidden, pinned) VALUES (?, 0, ?) "
+            "ON CONFLICT(collection_id) DO UPDATE SET pinned = excluded.pinned;";
+        StmtGuard sg;
+        check(sqlite3_prepare_v2(db_, sql, -1, &sg.stmt, nullptr), db_, "prepare");
+        sqlite3_bind_int64(sg.stmt, 1, collection_id);
+        sqlite3_bind_int(sg.stmt, 2, pinned ? 1 : 0);
+        check(sqlite3_step(sg.stmt), db_, "step");
+        exec("DELETE FROM folder_prefs WHERE hidden = 0 AND pinned = 0;");
+        exec("COMMIT;");
+    } catch (...) {
+        try { exec("ROLLBACK;"); } catch (...) {}
+        throw;
+    }
 }
 
 void Database::save_category_cache(const std::vector<MinifluxCategory>& categories) {

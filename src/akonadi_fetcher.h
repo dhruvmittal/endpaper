@@ -18,9 +18,16 @@ struct EmailItem {
 
 struct FolderInfo {
     int64_t collection_id;
+    int64_t parent_id = -1;
     std::string name;
     std::string full_path;   // e.g. "Local Folders/Inbox"
 };
+
+/// Resolve hierarchical full_path strings from parent_id links in-place.
+void populate_folder_paths(std::vector<FolderInfo>& folders);
+
+/// True for standard non-reading folders (Trash, Sent, Drafts, Outbox, Junk/Spam, etc.).
+[[nodiscard]] bool is_system_mail_folder(const std::string& name);
 
 /// Async wrapper around KF6 Akonadi for fetching KMail data.
 /// All fetch operations run on a background thread with a Qt event loop.

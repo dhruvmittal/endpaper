@@ -14,6 +14,8 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -425,7 +427,22 @@ void TuiApp::run() {
     // ═════════════════════════════════════════════════════════════════════
     // TAB 0: KMAIL (Akonadi)
     // ═════════════════════════════════════════════════════════════════════
+    struct TuiFolderEntry {
+        int64_t collection_id = -1;
+        bool has_children = false;
+        bool is_root = false;
+        bool is_pinned_row = false;
+        std::string name;
+        std::string label;
+    };
+
     std::vector<FolderInfo> folders;
+    FolderPrefs folder_prefs = db_.load_folder_prefs();
+    std::unordered_set<int64_t> expanded_kmail_nodes;
+    bool auto_expand_last_done = false;
+    bool show_hidden_kmail = false;
+
+    std::vector<TuiFolderEntry> folder_rows;
     std::vector<std::string> folder_labels;
     int selected_folder_idx = 0;
 
@@ -433,14 +450,162 @@ void TuiApp::run() {
     std::string kmail_filter;
     FilteredView kmail_view;
 
-    if (cache_metadata) {
-        folders = db_.load_folder_cache();
-        for (size_t i = 0; i < folders.size(); ++i) {
-            folder_labels.push_back(folders[i].full_path);
-            if (folders[i].collection_id == last_kmail_col_id) {
-                selected_folder_idx = static_cast<int>(i);
+    auto collect_kmail_subtree = [&](int64_t root_id) {
+        std::unordered_map<int64_t, std::vector<int64_t>> by_parent;
+        for (const auto& f : folders) {
+            if (f.parent_id != -1 && f.parent_id != f.collection_id) {
+                by_parent[f.parent_id].push_back(f.collection_id);
             }
         }
+        std::vector<int64_t> out;
+        std::unordered_set<int64_t> seen;
+        std::vector<int64_t> stack{root_id};
+        while (!stack.empty()) {
+            int64_t cur = stack.back();
+            stack.pop_back();
+            if (!seen.insert(cur).second) continue;
+            out.push_back(cur);
+            if (auto it = by_parent.find(cur); it != by_parent.end()) {
+                for (int64_t ch : it->second) stack.push_back(ch);
+            }
+        }
+        return out;
+    };
+
+    auto rebuild_kmail_tree = [&](bool prefer_last = false) {
+        populate_folder_paths(folders);
+        folder_prefs = db_.load_folder_prefs();
+
+        int64_t target_id = prefer_last
+            ? last_kmail_col_id
+            : (selected_folder_idx >= 0 && selected_folder_idx < static_cast<int>(folder_rows.size())
+                   ? folder_rows[selected_folder_idx].collection_id
+                   : last_kmail_col_id);
+
+        std::unordered_map<int64_t, const FolderInfo*> by_id;
+        by_id.reserve(folders.size());
+        for (const auto& f : folders) by_id.emplace(f.collection_id, &f);
+
+        auto is_hidden = [&](int64_t cid) {
+            int64_t cur = cid;
+            for (int depth = 0; depth < 32 && cur != -1; ++depth) {
+                if (folder_prefs.hidden.count(cur)) return true;
+                auto it = by_id.find(cur);
+                if (it == by_id.end()) break;
+                cur = it->second->parent_id;
+            }
+            return false;
+        };
+
+        if (!auto_expand_last_done && last_kmail_col_id != -1 && !folders.empty()) {
+            auto_expand_last_done = true;
+            if (!is_hidden(last_kmail_col_id) && !folder_prefs.pinned.count(last_kmail_col_id)) {
+                auto it = by_id.find(last_kmail_col_id);
+                if (it != by_id.end()) {
+                    int64_t cur = it->second->parent_id;
+                    for (int depth = 0; depth < 32 && cur != -1; ++depth) {
+                        expanded_kmail_nodes.insert(cur);
+                        auto pit = by_id.find(cur);
+                        if (pit == by_id.end()) break;
+                        cur = pit->second->parent_id;
+                    }
+                }
+            }
+        }
+
+        auto root_name_for = [&](int64_t cid) -> std::string {
+            int64_t cur = cid;
+            const FolderInfo* root = nullptr;
+            for (int depth = 0; depth < 32 && cur != -1; ++depth) {
+                auto it = by_id.find(cur);
+                if (it == by_id.end()) break;
+                root = it->second;
+                cur = it->second->parent_id;
+            }
+            return (root && root->collection_id != cid) ? root->name : "";
+        };
+
+        folder_rows.clear();
+        folder_labels.clear();
+        int matched_row = -1;
+
+        // Pinned rows at top
+        for (const auto& f : folders) {
+            if (!folder_prefs.pinned.count(f.collection_id) || is_hidden(f.collection_id)) continue;
+            std::string acct = root_name_for(f.collection_id);
+            std::string lbl = "★ " + (f.name.empty() ? f.full_path : f.name);
+            if (!acct.empty()) lbl += " (" + acct + ")";
+            if (f.collection_id == target_id && matched_row == -1) {
+                matched_row = static_cast<int>(folder_rows.size());
+            }
+            folder_rows.push_back(TuiFolderEntry{
+                f.collection_id, false, false, true, f.name, lbl
+            });
+            folder_labels.push_back(lbl);
+        }
+
+        // Hierarchical accounts & folders
+        std::unordered_map<int64_t, std::vector<const FolderInfo*>> children_by_parent;
+        std::vector<const FolderInfo*> roots;
+        for (const auto& f : folders) {
+            if (is_hidden(f.collection_id) && !show_hidden_kmail) continue;
+            if (f.parent_id == -1 || f.parent_id == f.collection_id || by_id.find(f.parent_id) == by_id.end()) {
+                roots.push_back(&f);
+            } else {
+                children_by_parent[f.parent_id].push_back(&f);
+            }
+        }
+
+        std::function<void(const FolderInfo*, int, bool)> append_node;
+        append_node = [&](const FolderInfo* f, int depth, bool is_root) {
+            std::vector<const FolderInfo*> vis_children;
+            if (auto it = children_by_parent.find(f->collection_id); it != children_by_parent.end()) {
+                for (const FolderInfo* ch : it->second) {
+                    if (!is_hidden(ch->collection_id) || show_hidden_kmail) {
+                        vis_children.push_back(ch);
+                    }
+                }
+            }
+            bool has_ch = !vis_children.empty();
+            bool expanded = has_ch && expanded_kmail_nodes.count(f->collection_id) > 0;
+            std::string lbl(static_cast<size_t>(depth * 2), ' ');
+            if (has_ch) lbl += expanded ? "▾ " : "▸ ";
+            else lbl += "  ";
+            lbl += f->name.empty() ? f->full_path : f->name;
+            if (folder_prefs.pinned.count(f->collection_id)) lbl += " ★";
+            if (is_hidden(f->collection_id)) lbl += " [hidden]";
+
+            if (f->collection_id == target_id && matched_row == -1) {
+                matched_row = static_cast<int>(folder_rows.size());
+            }
+            folder_rows.push_back(TuiFolderEntry{
+                f->collection_id, has_ch, is_root, false, f->name, lbl
+            });
+            folder_labels.push_back(lbl);
+
+            if (expanded) {
+                for (const FolderInfo* ch : vis_children) {
+                    append_node(ch, depth + 1, false);
+                }
+            }
+        };
+
+        for (const FolderInfo* r : roots) {
+            append_node(r, 0, true);
+        }
+
+        if (matched_row >= 0) {
+            selected_folder_idx = matched_row;
+        } else if (folder_labels.empty()) {
+            selected_folder_idx = 0;
+        } else if (selected_folder_idx >= static_cast<int>(folder_labels.size())) {
+            selected_folder_idx = static_cast<int>(folder_labels.size()) - 1;
+        }
+    };
+
+    if (cache_metadata) {
+        folders = db_.load_folder_cache();
+        rebuild_kmail_tree(true);
     }
 
     auto fetch_kmail_folders = [&]() {
@@ -461,14 +626,7 @@ void TuiApp::run() {
                 run_on_ui([&, result = std::move(result)]() mutable {
                     loading_folders = false;
                     folders = std::move(result);
-                    folder_labels.clear();
-                    selected_folder_idx = 0;
-                    for (size_t i = 0; i < folders.size(); ++i) {
-                        folder_labels.push_back(folders[i].full_path);
-                        if (folders[i].collection_id == last_kmail_col_id) {
-                            selected_folder_idx = static_cast<int>(i);
-                        }
-                    }
+                    rebuild_kmail_tree(true);
                     set_status("Loaded " + std::to_string(folders.size()) + " KMail folders");
                 });
             } catch (const std::exception& e) {
@@ -488,8 +646,18 @@ void TuiApp::run() {
 
     auto fetch_kmail_emails = [&]() {
         if (is_busy()) return;
-        if (selected_folder_idx < 0 || selected_folder_idx >= static_cast<int>(folders.size())) {
+        if (selected_folder_idx < 0 || selected_folder_idx >= static_cast<int>(folder_rows.size())) {
             set_status("Select a KMail folder first.", true);
+            return;
+        }
+        const auto& row = folder_rows[selected_folder_idx];
+        if (row.is_root && row.has_children) {
+            if (expanded_kmail_nodes.count(row.collection_id)) {
+                expanded_kmail_nodes.erase(row.collection_id);
+            } else {
+                expanded_kmail_nodes.insert(row.collection_id);
+            }
+            rebuild_kmail_tree(false);
             return;
         }
         akonadi_available = fetcher_.is_available();
@@ -498,12 +666,12 @@ void TuiApp::run() {
             return;
         }
 
-        int64_t col_id = folders[selected_folder_idx].collection_id;
+        int64_t col_id = row.collection_id;
         last_kmail_col_id = col_id;
         persist_state("state", "last_kmail_collection_id", std::to_string(col_id));
 
         loading_emails = true;
-        set_status("Fetching emails from " + folders[selected_folder_idx].name + "...");
+        set_status("Fetching emails from " + row.name + "...");
         worker_pool.launch([&, col_id]() {
             try {
                 auto emails = fetcher_.fetch_emails(col_id).get();
@@ -543,7 +711,39 @@ void TuiApp::run() {
     kmail_folder_mopt.entries = &folder_labels;
     kmail_folder_mopt.selected = &selected_folder_idx;
     kmail_folder_mopt.on_enter = fetch_kmail_emails;
-    auto kmail_folder_menu = Menu(std::move(kmail_folder_mopt));
+    auto raw_kmail_folder_menu = Menu(std::move(kmail_folder_mopt));
+    auto kmail_folder_menu = CatchEvent(raw_kmail_folder_menu, [&](Event ev) {
+        if (selected_folder_idx < 0 || selected_folder_idx >= static_cast<int>(folder_rows.size())) {
+            return false;
+        }
+        const auto row = folder_rows[selected_folder_idx];
+        if (ev == Event::ArrowRight && row.has_children && !row.is_pinned_row) {
+            expanded_kmail_nodes.insert(row.collection_id);
+            rebuild_kmail_tree(false);
+            return true;
+        }
+        if (ev == Event::ArrowLeft && row.has_children && !row.is_pinned_row) {
+            expanded_kmail_nodes.erase(row.collection_id);
+            rebuild_kmail_tree(false);
+            return true;
+        }
+        if ((ev == Event::Character('p') || ev == Event::Character('P')) && !row.is_root) {
+            bool next_pin = folder_prefs.pinned.count(row.collection_id) == 0;
+            db_.set_folder_pinned(row.collection_id, next_pin);
+            rebuild_kmail_tree(false);
+            set_status((next_pin ? "Pinned folder: " : "Unpinned folder: ") + row.name);
+            return true;
+        }
+        if (ev == Event::Character('h') || ev == Event::Character('H')) {
+            auto ids = collect_kmail_subtree(row.collection_id);
+            bool currently_hidden = folder_prefs.hidden.count(row.collection_id) > 0;
+            db_.set_folders_hidden(ids, !currently_hidden);
+            rebuild_kmail_tree(false);
+            set_status((currently_hidden ? "Unhid " : "Hid ") + row.name);
+            return true;
+        }
+        return false;
+    });
 
     auto kmail_filter_input = make_input(&kmail_filter, "Filter emails...", false, [&]() {
         rebuild_filtered_view(kmail_articles, kmail_filter, fuzzy_search, kmail_view);
@@ -553,6 +753,25 @@ void TuiApp::run() {
 
     auto kmail_btn_folders = Button("Fetch Folders", fetch_kmail_folders);
     auto kmail_btn_emails = Button("Load Folder", fetch_kmail_emails);
+    auto kmail_btn_hide_sys = Button("Hide System", [&]() {
+        std::vector<int64_t> sys_ids;
+        for (const auto& f : folders) {
+            if (is_system_mail_folder(f.name)) {
+                auto sub = collect_kmail_subtree(f.collection_id);
+                sys_ids.insert(sys_ids.end(), sub.begin(), sub.end());
+            }
+        }
+        db_.set_folders_hidden(sys_ids, true);
+        rebuild_kmail_tree(false);
+        set_status("Hidden system folders (" + std::to_string(sys_ids.size()) + ")");
+    });
+    auto kmail_show_hidden_cb = [&]() {
+        CheckboxOption opt = CheckboxOption::Simple();
+        opt.label = "Show hidden";
+        opt.checked = &show_hidden_kmail;
+        opt.on_change = [&]() { rebuild_kmail_tree(false); };
+        return Checkbox(std::move(opt));
+    }();
     auto kmail_btn_all = Button("Select All", [&]() {
         select_visible(kmail_articles, kmail_view, kmail_filter, true);
     });
@@ -564,7 +783,10 @@ void TuiApp::run() {
     });
 
     auto kmail_container = Container::Vertical({
-        Container::Horizontal({kmail_book_dd, kmail_btn_folders, kmail_btn_emails}),
+        Container::Horizontal({
+            kmail_book_dd, kmail_btn_folders, kmail_btn_emails,
+            kmail_btn_hide_sys, kmail_show_hidden_cb,
+        }),
         kmail_filter_input,
         Container::Horizontal({kmail_folder_menu, kmail_article_menu}),
         Container::Horizontal({kmail_btn_all, kmail_btn_none, kmail_btn_stage}),
@@ -579,6 +801,10 @@ void TuiApp::run() {
                 kmail_btn_folders->Render(),
                 text(" "),
                 kmail_btn_emails->Render(),
+                text(" "),
+                kmail_btn_hide_sys->Render(),
+                text(" "),
+                kmail_show_hidden_cb->Render() | vcenter,
                 filler(),
                 text(akonadi_available ? "Akonadi: Online " : "Akonadi: Offline ") |
                     color(akonadi_available ? Color::Green : Color::Red),
@@ -588,9 +814,9 @@ void TuiApp::run() {
             separator(),
             hbox({
                 vbox({
-                    text(" Folders (" + std::to_string(folder_labels.size()) + ")") | bold,
+                    text(" Folders (" + std::to_string(folder_labels.size()) + ")  [p:pin h:hide ←/→]") | bold,
                     kmail_folder_menu->Render() | vscroll_indicator | frame | flex,
-                }) | size(WIDTH, GREATER_THAN, 26) | size(WIDTH, LESS_THAN, 40) | border,
+                }) | size(WIDTH, GREATER_THAN, 30) | size(WIDTH, LESS_THAN, 44) | border,
                 vbox({
                     text(" Emails (" + std::to_string(kmail_view.labels.size()) + ")  [Space/Enter: toggle]") | bold,
                     kmail_article_menu->Render() | vscroll_indicator | frame | flex,

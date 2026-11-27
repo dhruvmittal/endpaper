@@ -20,6 +20,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QProgressBar>
@@ -35,12 +36,15 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <exception>
+#include <functional>
 #include <future>
 #include <memory>
+#include <unordered_map>
 
 namespace endpaper {
 
@@ -98,6 +102,25 @@ QLabel* createViewportPlaceholder(QWidget* viewport) {
     layout->addWidget(label);
     layout->addStretch(1);
     return label;
+}
+
+QIcon iconForFolder(const std::string& name, bool isAccountRoot) {
+    if (isAccountRoot) return QIcon::fromTheme(QStringLiteral("folder-mail"));
+    QString lower = QString::fromStdString(name).trimmed().toLower();
+    if (lower == "inbox") return QIcon::fromTheme(QStringLiteral("mail-folder-inbox"));
+    if (lower == "sent" || lower == "sent-mail" || lower == "sent mail" ||
+        lower == "sent items" || lower == "sent messages") {
+        return QIcon::fromTheme(QStringLiteral("mail-folder-sent"));
+    }
+    if (lower == "outbox") return QIcon::fromTheme(QStringLiteral("mail-folder-outbox"));
+    if (lower == "trash" || lower == "bin" || lower == "deleted" ||
+        lower == "deleted items" || lower == "deleted messages") {
+        return QIcon::fromTheme(QStringLiteral("user-trash"));
+    }
+    if (lower == "draft" || lower == "drafts") {
+        return QIcon::fromTheme(QStringLiteral("document-edit"));
+    }
+    return QIcon::fromTheme(QStringLiteral("folder"));
 }
 
 } // namespace
@@ -366,6 +389,7 @@ MainWindow::MainWindow(Config& config,
     setupUi();
     setupShortcuts();
 
+    m_folderPrefs = m_db.load_folder_prefs();
     loadCachedMetadata();
     loadRssFeedsIntoList();
     refreshBooks();
@@ -373,9 +397,9 @@ MainWindow::MainWindow(Config& config,
     updateAkonadiFooter();
     setStatus("Ready");
 
-    QListWidget* focusTarget = (m_activeSource == 0) ? m_kmailFolderList
-                             : (m_activeSource == 1) ? m_mfCategoryList
-                                                     : m_rssFeedList;
+    QWidget* focusTarget = (m_activeSource == 0) ? static_cast<QWidget*>(m_kmailFolderTree)
+                         : (m_activeSource == 1) ? static_cast<QWidget*>(m_mfCategoryList)
+                                                 : static_cast<QWidget*>(m_rssFeedList);
     focusTarget->setFocus();
 }
 
@@ -500,6 +524,14 @@ void MainWindow::setupUi() {
     hdrFont.setBold(true);
     m_sourceHeaderLabel->setFont(hdrFont);
 
+    m_manageFoldersBtn = new QToolButton(sourcesPane);
+    m_manageFoldersBtn->setIcon(QIcon::fromTheme("view-filter"));
+    m_manageFoldersBtn->setText("Manage Folders");
+    m_manageFoldersBtn->setAccessibleName("Manage visible KMail folders");
+    m_manageFoldersBtn->setAutoRaise(true);
+    m_manageFoldersBtn->setToolTip("Configure visible KMail accounts and folders…");
+    connect(m_manageFoldersBtn, &QToolButton::clicked, this, &MainWindow::openFolderVisibilityDialog);
+
     m_refreshSourceBtn = new QToolButton(sourcesPane);
     m_refreshSourceBtn->setIcon(QIcon::fromTheme("view-refresh"));
     m_refreshSourceBtn->setText("Refresh");
@@ -509,6 +541,7 @@ void MainWindow::setupUi() {
     connect(m_refreshSourceBtn, &QToolButton::clicked, this, &MainWindow::refreshCurrentSource);
 
     srcHdrRow->addWidget(m_sourceHeaderLabel, 1);
+    srcHdrRow->addWidget(m_manageFoldersBtn);
     srcHdrRow->addWidget(m_refreshSourceBtn);
     sourcesLayout->addLayout(srcHdrRow);
 
@@ -519,14 +552,29 @@ void MainWindow::setupUi() {
     auto* kmailLayout = new QVBoxLayout(kmailContainer);
     kmailLayout->setContentsMargins(0, 0, 0, 0);
     kmailLayout->setSpacing(4);
-    m_kmailFolderList = new QListWidget(kmailContainer);
-    m_kmailFolderList->installEventFilter(this);
-    connect(m_kmailFolderList, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
-        if (!item) return;
-        fetchEmails(item->data(Qt::UserRole).toLongLong());
+    m_kmailFolderTree = new QTreeWidget(kmailContainer);
+    m_kmailFolderTree->setHeaderHidden(true);
+    m_kmailFolderTree->setIndentation(14);
+    m_kmailFolderTree->setAnimated(true);
+    m_kmailFolderTree->setUniformRowHeights(true);
+    m_kmailFolderTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_kmailFolderTree->installEventFilter(this);
+    m_kmailEmptyLabel = createViewportPlaceholder(m_kmailFolderTree->viewport());
+    connect(m_kmailFolderTree, &QTreeWidget::itemClicked, this, &MainWindow::activateKMailFolderItem);
+    connect(m_kmailFolderTree, &QTreeWidget::customContextMenuRequested,
+            this, &MainWindow::showKMailFolderContextMenu);
+    connect(m_kmailFolderTree, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem* item) {
+        if (m_rebuildingFolders || !item) return;
+        int64_t cid = item->data(0, Qt::UserRole).toLongLong();
+        if (cid != -1 && cid != -2) m_expandedFolders.insert(cid);
+    });
+    connect(m_kmailFolderTree, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem* item) {
+        if (m_rebuildingFolders || !item) return;
+        int64_t cid = item->data(0, Qt::UserRole).toLongLong();
+        if (cid != -1 && cid != -2) m_expandedFolders.erase(cid);
     });
     m_akonadiStatusLabel = new QLabel(kmailContainer);
-    kmailLayout->addWidget(m_kmailFolderList, 1);
+    kmailLayout->addWidget(m_kmailFolderTree, 1);
     kmailLayout->addWidget(m_akonadiStatusLabel);
     m_sourceStack->addWidget(kmailContainer);
 
@@ -953,13 +1001,17 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             m_articleModels[m_activeSource]->toggleRows(sourceRows);
             return true;
         }
+        if ((ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) && watched == m_kmailFolderTree) {
+            if (QTreeWidgetItem* item = m_kmailFolderTree->currentItem()) {
+                activateKMailFolderItem(item);
+                return true;
+            }
+        }
         if ((ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) &&
-            (watched == m_kmailFolderList || watched == m_mfCategoryList || watched == m_rssFeedList)) {
+            (watched == m_mfCategoryList || watched == m_rssFeedList)) {
             auto* list = static_cast<QListWidget*>(watched);
             if (QListWidgetItem* item = list->currentItem()) {
-                if (watched == m_kmailFolderList) {
-                    fetchEmails(item->data(Qt::UserRole).toLongLong());
-                } else if (watched == m_mfCategoryList) {
+                if (watched == m_mfCategoryList) {
                     m_lastMfCategoryId = item->data(Qt::UserRole).toLongLong();
                     persistInt64("state", "last_miniflux_category_id", m_lastMfCategoryId);
                     fetchMinifluxEntries();
@@ -1040,6 +1092,7 @@ void MainWindow::setBusy(bool busy) {
     }
     m_busy = busy;
     m_busyBar->setVisible(busy);
+    m_manageFoldersBtn->setEnabled(!busy);
     m_refreshSourceBtn->setEnabled(!busy);
     m_rssToggleAddBtn->setEnabled(!busy);
     m_rssRemoveBtn->setEnabled(!busy && m_rssFeedList->currentItem() != nullptr);
@@ -1107,6 +1160,7 @@ void MainWindow::setActiveSource(int index) {
     }
     m_sourceStack->setCurrentIndex(m_activeSource);
     m_mfFilterBar->setVisible(m_activeSource == 1);
+    m_manageFoldersBtn->setVisible(m_activeSource == 0);
 
     static const char* kHeaders[3] = {"KMail Folders", "Miniflux Categories", "RSS Feeds"};
     m_sourceHeaderLabel->setText(kHeaders[m_activeSource]);
@@ -1142,24 +1196,258 @@ void MainWindow::maybeAutoFetchActiveSource() {
 }
 
 void MainWindow::loadCachedMetadata() {
-    if (!cacheMetadata()) return;
-    loadFoldersIntoList(m_db.load_folder_cache());
-    auto cats = m_db.load_category_cache();
-    if (!cats.empty()) {
-        loadCategoriesIntoList(with_all_category(cats));
+    if (cacheMetadata()) {
+        setFolders(m_db.load_folder_cache());
+        auto cats = m_db.load_category_cache();
+        if (!cats.empty()) {
+            loadCategoriesIntoList(with_all_category(cats));
+        }
+    } else {
+        rebuildKMailFolderTree();
     }
 }
 
-void MainWindow::loadFoldersIntoList(const std::vector<FolderInfo>& folders) {
-    m_kmailFolderList->clear();
-    int matchRow = -1;
-    for (int i = 0; i < static_cast<int>(folders.size()); ++i) {
-        const auto& f = folders[static_cast<size_t>(i)];
-        auto* item = new QListWidgetItem(QString::fromStdString(f.full_path), m_kmailFolderList);
-        item->setData(Qt::UserRole, static_cast<qint64>(f.collection_id));
-        if (f.collection_id == m_lastKMailCollectionId) matchRow = i;
+void MainWindow::reloadKMailFolders() {
+    m_folderPrefs = m_db.load_folder_prefs();
+    setFolders(m_db.load_folder_cache());
+}
+
+void MainWindow::setFolders(std::vector<FolderInfo> folders) {
+    m_allFolders = std::move(folders);
+    populate_folder_paths(m_allFolders);
+    rebuildKMailFolderTree();
+}
+
+std::vector<int64_t> MainWindow::collectSubtreeIds(int64_t rootId) const {
+    std::unordered_map<int64_t, std::vector<int64_t>> childrenByParent;
+    for (const auto& f : m_allFolders) {
+        if (f.parent_id != -1 && f.parent_id != f.collection_id) {
+            childrenByParent[f.parent_id].push_back(f.collection_id);
+        }
     }
-    if (matchRow >= 0) m_kmailFolderList->setCurrentRow(matchRow);
+    std::vector<int64_t> result;
+    std::unordered_set<int64_t> seen;
+    std::vector<int64_t> stack{rootId};
+    while (!stack.empty()) {
+        int64_t cur = stack.back();
+        stack.pop_back();
+        if (!seen.insert(cur).second) continue;
+        result.push_back(cur);
+        if (auto it = childrenByParent.find(cur); it != childrenByParent.end()) {
+            for (int64_t ch : it->second) stack.push_back(ch);
+        }
+    }
+    return result;
+}
+
+void MainWindow::setFolderPinned(int64_t collectionId, bool pinned) {
+    m_db.set_folder_pinned(collectionId, pinned);
+    m_folderPrefs = m_db.load_folder_prefs();
+    rebuildKMailFolderTree();
+}
+
+void MainWindow::hideFolderSubtree(int64_t collectionId) {
+    auto ids = collectSubtreeIds(collectionId);
+    m_db.set_folders_hidden(ids, true);
+    m_folderPrefs = m_db.load_folder_prefs();
+    rebuildKMailFolderTree();
+}
+
+void MainWindow::rebuildKMailFolderTree() {
+    m_rebuildingFolders = true;
+    m_kmailFolderTree->clear();
+
+    std::unordered_map<int64_t, const FolderInfo*> byId;
+    byId.reserve(m_allFolders.size());
+    for (const auto& f : m_allFolders) {
+        byId.emplace(f.collection_id, &f);
+    }
+
+    auto isHidden = [&](int64_t cid) {
+        int64_t cur = cid;
+        for (int depth = 0; depth < 32 && cur != -1; ++depth) {
+            if (m_folderPrefs.hidden.count(cur)) return true;
+            auto it = byId.find(cur);
+            if (it == byId.end()) break;
+            cur = it->second->parent_id;
+        }
+        return false;
+    };
+
+    QTreeWidgetItem* currentMatch = nullptr;
+
+    // 1. Pinned section at top
+    std::vector<const FolderInfo*> pinnedFolders;
+    for (const auto& f : m_allFolders) {
+        if (m_folderPrefs.pinned.count(f.collection_id) && !isHidden(f.collection_id)) {
+            pinnedFolders.push_back(&f);
+        }
+    }
+    if (!pinnedFolders.empty()) {
+        auto* pinnedRoot = new QTreeWidgetItem(m_kmailFolderTree);
+        pinnedRoot->setText(0, "Pinned");
+        pinnedRoot->setIcon(0, QIcon::fromTheme(QStringLiteral("pin")));
+        QFont boldFont = pinnedRoot->font(0);
+        boldFont.setBold(true);
+        pinnedRoot->setFont(0, boldFont);
+        pinnedRoot->setData(0, Qt::UserRole, static_cast<qint64>(-2));
+        pinnedRoot->setData(0, Qt::UserRole + 1, false);
+
+        for (const FolderInfo* f : pinnedFolders) {
+            auto* child = new QTreeWidgetItem(pinnedRoot);
+            QString label = f->name.empty()
+                ? QString::fromStdString(f->full_path)
+                : QString::fromStdString(f->name);
+            child->setText(0, label);
+            child->setToolTip(0, QString::fromStdString(f->full_path));
+            child->setIcon(0, iconForFolder(f->name, false));
+            child->setData(0, Qt::UserRole, static_cast<qint64>(f->collection_id));
+            child->setData(0, Qt::UserRole + 1, true);
+            if (f->collection_id == m_lastKMailCollectionId) {
+                currentMatch = child;
+            }
+        }
+        pinnedRoot->setExpanded(true);
+    }
+
+    // 2. Determine ancestor chain to auto-expand for last active non-pinned folder
+    std::unordered_set<int64_t> autoExpandIds;
+    if (m_lastKMailCollectionId != -1 &&
+        !isHidden(m_lastKMailCollectionId) &&
+        !m_folderPrefs.pinned.count(m_lastKMailCollectionId)) {
+        auto it = byId.find(m_lastKMailCollectionId);
+        if (it != byId.end()) {
+            int64_t cur = it->second->parent_id;
+            for (int depth = 0; depth < 32 && cur != -1; ++depth) {
+                autoExpandIds.insert(cur);
+                auto pit = byId.find(cur);
+                if (pit == byId.end()) break;
+                cur = pit->second->parent_id;
+            }
+        }
+    }
+
+    // 3. Build account/folder hierarchy (roots start collapsed unless active or user-expanded)
+    std::unordered_map<int64_t, std::vector<const FolderInfo*>> childrenMap;
+    std::vector<const FolderInfo*> roots;
+    for (const auto& f : m_allFolders) {
+        if (isHidden(f.collection_id)) continue;
+        if (f.parent_id == -1 || f.parent_id == f.collection_id || byId.find(f.parent_id) == byId.end()) {
+            roots.push_back(&f);
+        } else {
+            childrenMap[f.parent_id].push_back(&f);
+        }
+    }
+
+    std::function<QTreeWidgetItem*(const FolderInfo*, QTreeWidgetItem*, bool)> addNode;
+    addNode = [&](const FolderInfo* info, QTreeWidgetItem* parentItem, bool isRoot) -> QTreeWidgetItem* {
+        auto* item = parentItem ? new QTreeWidgetItem(parentItem) : new QTreeWidgetItem(m_kmailFolderTree);
+        QString label = info->name.empty()
+            ? QString::fromStdString(info->full_path)
+            : QString::fromStdString(info->name);
+        item->setText(0, label);
+        item->setToolTip(0, QString::fromStdString(info->full_path));
+        item->setIcon(0, iconForFolder(info->name, isRoot));
+        item->setData(0, Qt::UserRole, static_cast<qint64>(info->collection_id));
+        item->setData(0, Qt::UserRole + 1, false);
+        if (isRoot) {
+            QFont f = item->font(0);
+            f.setBold(true);
+            item->setFont(0, f);
+        }
+        if (info->collection_id == m_lastKMailCollectionId && !currentMatch) {
+            currentMatch = item;
+        }
+        if (auto cit = childrenMap.find(info->collection_id); cit != childrenMap.end()) {
+            for (const FolderInfo* ch : cit->second) {
+                addNode(ch, item, false);
+            }
+        }
+        bool expanded = m_expandedFolders.count(info->collection_id) > 0 ||
+                        autoExpandIds.count(info->collection_id) > 0;
+        item->setExpanded(expanded);
+        return item;
+    };
+
+    for (const FolderInfo* root : roots) {
+        addNode(root, nullptr, true);
+    }
+
+    if (currentMatch) {
+        m_kmailFolderTree->setCurrentItem(currentMatch);
+    }
+
+    bool empty = (m_kmailFolderTree->topLevelItemCount() == 0);
+    m_kmailEmptyLabel->setVisible(empty);
+    if (empty) {
+        m_kmailEmptyLabel->setText(
+            m_allFolders.empty()
+                ? "Click Refresh to load KMail folders"
+                : "No KMail folders visible\nClick Manage Folders to show folders");
+    }
+    m_rebuildingFolders = false;
+}
+
+void MainWindow::activateKMailFolderItem(QTreeWidgetItem* item) {
+    if (!item) return;
+    int64_t cid = item->data(0, Qt::UserRole).toLongLong();
+    if (cid == -2 || (item->parent() == nullptr && item->childCount() > 0 && !item->data(0, Qt::UserRole + 1).toBool())) {
+        item->setExpanded(!item->isExpanded());
+        return;
+    }
+    fetchEmails(cid);
+}
+
+void MainWindow::openFolderVisibilityDialog() {
+    if (m_allFolders.empty()) {
+        setStatus("Fetch KMail folders first to configure visibility.", false);
+        return;
+    }
+    FolderVisibilityDialog dlg(m_db, m_allFolders, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        m_folderPrefs = m_db.load_folder_prefs();
+        rebuildKMailFolderTree();
+        setStatus("Updated visible KMail folders.");
+    }
+}
+
+void MainWindow::showKMailFolderContextMenu(const QPoint& pos) {
+    QMenu menu(this);
+    QTreeWidgetItem* item = m_kmailFolderTree->itemAt(pos);
+
+    if (item) {
+        int64_t cid = item->data(0, Qt::UserRole).toLongLong();
+        bool isAccountRoot = (item->parent() == nullptr && cid != -2 && !item->data(0, Qt::UserRole + 1).toBool());
+
+        if (isAccountRoot) {
+            if (item->childCount() > 0) {
+                QAction* toggleExpand = menu.addAction(item->isExpanded() ? "Collapse Account" : "Expand Account");
+                connect(toggleExpand, &QAction::triggered, this, [item]() {
+                    item->setExpanded(!item->isExpanded());
+                });
+            }
+            QAction* hideAcct = menu.addAction(QIcon::fromTheme(QStringLiteral("view-hidden")), "Hide Account");
+            connect(hideAcct, &QAction::triggered, this, [this, cid]() { hideFolderSubtree(cid); });
+            menu.addSeparator();
+        } else if (cid > 0) {
+            bool isPinned = m_folderPrefs.pinned.count(cid) > 0;
+            QAction* pinAct = menu.addAction(
+                QIcon::fromTheme(QStringLiteral("pin")),
+                isPinned ? "Unpin from Top" : "Pin to Top");
+            connect(pinAct, &QAction::triggered, this, [this, cid, isPinned]() {
+                setFolderPinned(cid, !isPinned);
+            });
+            QAction* hideAct = menu.addAction(QIcon::fromTheme(QStringLiteral("view-hidden")), "Hide Folder");
+            connect(hideAct, &QAction::triggered, this, [this, cid]() { hideFolderSubtree(cid); });
+            menu.addSeparator();
+        }
+    }
+
+    QAction* manageAct = menu.addAction(QIcon::fromTheme(QStringLiteral("view-filter")), "Manage Visible Folders…");
+    manageAct->setEnabled(!m_allFolders.empty());
+    connect(manageAct, &QAction::triggered, this, &MainWindow::openFolderVisibilityDialog);
+
+    menu.exec(m_kmailFolderTree->viewport()->mapToGlobal(pos));
 }
 
 void MainWindow::loadCategoriesIntoList(const std::vector<MinifluxCategory>& categories) {
@@ -1229,10 +1517,11 @@ void MainWindow::fetchFolders() {
             if (m_workers.is_shutting_down()) return;
             if (shouldCache) m_db.save_folder_cache(folders);
 
-            QMetaObject::invokeMethod(this, [this, folders = std::move(folders)]() {
+            QMetaObject::invokeMethod(this, [this, folders = std::move(folders)]() mutable {
                 if (m_workers.is_shutting_down()) return;
-                loadFoldersIntoList(folders);
-                setStatus(QString("Loaded %1 KMail folders").arg(folders.size()));
+                size_t n = folders.size();
+                setFolders(std::move(folders));
+                setStatus(QString("Loaded %1 KMail folders").arg(n));
                 setBusy(false);
             }, Qt::QueuedConnection);
         } catch (const std::exception& e) {
@@ -1859,11 +2148,16 @@ void MainWindow::openSettings() {
     std::string prevAuthor = m_config.get("epub", "author", "Unknown");
     std::string prevPublisher = m_config.get("epub", "publisher", "Endpaper");
 
-    SettingsDialog dlg(m_config, m_fetcher, this);
+    SettingsDialog dlg(m_config, m_db, m_fetcher, m_allFolders, this);
     bool accepted = (dlg.exec() == QDialog::Accepted);
 
     m_akonadiAvailable = dlg.akonadiAvailable();
     updateAkonadiFooter();
+
+    if (dlg.foldersChanged()) {
+        m_folderPrefs = m_db.load_folder_prefs();
+        rebuildKMailFolderTree();
+    }
 
     if (!accepted) return;
 

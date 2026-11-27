@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 class QButtonGroup;
@@ -30,6 +31,8 @@ class QTableView;
 class QTimer;
 class QToolBar;
 class QToolButton;
+class QTreeWidget;
+class QTreeWidgetItem;
 class QWidget;
 
 namespace endpaper {
@@ -137,6 +140,7 @@ public:
     [[nodiscard]] QTableView* articleView() const { return m_articleView; }
     [[nodiscard]] QListWidget* chapterList() const { return m_chapterList; }
     [[nodiscard]] QListWidget* rssFeedList() const { return m_rssFeedList; }
+    [[nodiscard]] QTreeWidget* kmailFolderTree() const { return m_kmailFolderTree; }
     [[nodiscard]] QLineEdit* filterEdit() const { return m_filterEdit; }
     [[nodiscard]] QToolBar* mainToolBar() const { return m_toolBar; }
     [[nodiscard]] QComboBox* bookCombo() const { return m_bookCombo; }
@@ -146,6 +150,9 @@ public:
     [[nodiscard]] QLabel* chapterEmptyLabel() const { return m_chapterEmptyLabel; }
 
     void setActiveSource(int index);
+    void reloadKMailFolders();
+    void setFolderPinned(int64_t collectionId, bool pinned);
+    void hideFolderSubtree(int64_t collectionId);
     void refreshBooks();
     void refreshChapters();
     bool createBookByTitle(const QString& title);
@@ -169,6 +176,9 @@ private slots:
     void toggleRssAddBar(bool visible);
     void submitRssFeed();
     void removeSelectedRssFeed();
+    void openFolderVisibilityDialog();
+    void showKMailFolderContextMenu(const QPoint& pos);
+    void activateKMailFolderItem(QTreeWidgetItem* item);
 
     void stageSelectedOrHighlighted();
     void onArticleDoubleClicked(const QModelIndex& proxyIndex);
@@ -184,7 +194,9 @@ private:
     void setupUi();
     void setupShortcuts();
     void loadCachedMetadata();
-    void loadFoldersIntoList(const std::vector<FolderInfo>& folders);
+    void setFolders(std::vector<FolderInfo> folders);
+    void rebuildKMailFolderTree();
+    [[nodiscard]] std::vector<int64_t> collectSubtreeIds(int64_t rootId) const;
     void loadCategoriesIntoList(const std::vector<MinifluxCategory>& categories);
     void loadRssFeedsIntoList();
     void maybeAutoFetchActiveSource();
@@ -230,6 +242,7 @@ private:
     bool m_kmailAutoFetched = false;
     bool m_minifluxAutoFetched = false;
     bool m_rebuildingChapters = false;
+    bool m_rebuildingFolders = false;
     QTimer* m_dragSyncTimer = nullptr;
 
     int m_activeSource = 0; // 0 = KMail, 1 = Miniflux, 2 = RSS
@@ -242,6 +255,9 @@ private:
     std::vector<Book> m_books;
     std::vector<Chapter> m_chapters;
     std::vector<RssFeed> m_rssFeeds;
+    std::vector<FolderInfo> m_allFolders;
+    FolderPrefs m_folderPrefs;
+    std::unordered_set<int64_t> m_expandedFolders;
 
     // Toolbar
     QToolBar* m_toolBar = nullptr;
@@ -256,9 +272,11 @@ private:
     // Central splitter & Left sources pane
     QSplitter* m_splitter = nullptr;
     QLabel* m_sourceHeaderLabel = nullptr;
+    QToolButton* m_manageFoldersBtn = nullptr;
     QToolButton* m_refreshSourceBtn = nullptr;
     QStackedWidget* m_sourceStack = nullptr;
-    QListWidget* m_kmailFolderList = nullptr;
+    QTreeWidget* m_kmailFolderTree = nullptr;
+    QLabel* m_kmailEmptyLabel = nullptr;
     QLabel* m_akonadiStatusLabel = nullptr;
     QListWidget* m_mfCategoryList = nullptr;
     QListWidget* m_rssFeedList = nullptr;
