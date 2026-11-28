@@ -241,6 +241,22 @@ void Database::update_sort_order(int64_t chapter_id, int new_order) {
     check(sqlite3_step(sg.stmt), db_, "step");
 }
 
+void Database::reorder_chapters(const std::vector<int64_t>& chapter_ids) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    if (chapter_ids.empty()) return;
+
+    exec("BEGIN TRANSACTION;");
+    try {
+        for (size_t i = 0; i < chapter_ids.size(); ++i) {
+            update_sort_order(chapter_ids[i], static_cast<int>(i) + 1);
+        }
+        exec("COMMIT;");
+    } catch (...) {
+        try { exec("ROLLBACK;"); } catch (...) {}
+        throw;
+    }
+}
+
 bool Database::move_chapter(int64_t book_id, int64_t chapter_id, int delta) {
     std::lock_guard<std::recursive_mutex> lock(mu_);
     auto chapters = get_chapters(book_id);

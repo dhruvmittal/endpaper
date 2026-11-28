@@ -52,11 +52,13 @@ std::string serialize_inner_html(lxb_dom_node_t* parent) {
     return result;
 }
 
-std::optional<std::string> download_url_bytes(const std::string& url) {
+std::optional<std::string> download_url_bytes(const std::string& url,
+                                              const std::atomic<bool>* cancel_flag) {
     try {
         HttpOptions opts;
         opts.timeout_secs = 15;
         opts.max_bytes = kMaxImageDownloadBytes;
+        opts.cancel_flag = cancel_flag;
         HttpResponse resp = http_get(url, opts);
         if (resp.status_code == 200 && !resp.body.empty()) {
             return resp.body;
@@ -103,7 +105,10 @@ void process_images_in_dom(
                         progress_cb("Downloading image " + std::to_string(image_counter + 1) + "...");
                     }
                     std::optional<std::string> local_path;
-                    auto raw = download_url_bytes(src);
+                    auto raw = download_url_bytes(src, cancel_flag);
+                    if (cancel_flag && cancel_flag->load()) {
+                        throw std::runtime_error("Build canceled");
+                    }
                     if (raw) {
                         auto optimized = optimize_image_for_ereader(*raw, opts.max_image_width, opts.jpeg_quality);
                         if (optimized) {
@@ -315,35 +320,59 @@ std::optional<std::string> optimize_image_for_ereader(
     return std::string(jpeg_data.constData(), static_cast<size_t>(jpeg_data.size()));
 }
 
-bool matches_article_filter(const std::string& title,
-                            const std::string& author,
-                            const std::string& query,
-                            bool fuzzy_search) {
+CompiledArticleFilter::CompiledArticleFilter(const std::string& query, bool fuzzy_search)
+    : fuzzy_(fuzzy_search) {
     size_t first = query.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return true;
+    if (first == std::string::npos) {
+        empty_ = true;
+        return;
+    }
+    empty_ = false;
     size_t last = query.find_last_not_of(" \t\r\n");
     std::string trimmed = query.substr(first, last - first + 1);
 
-    if (fuzzy_search) {
-        std::string haystack = to_lower(title + " " + author);
+    if (fuzzy_) {
         std::istringstream iss(trimmed);
         std::string term;
         while (iss >> term) {
-            if (haystack.find(to_lower(term)) == std::string::npos) {
+            terms_.push_back(to_lower(term));
+        }
+        if (terms_.empty()) empty_ = true;
+        return;
+    }
+
+    try {
+        regex_.emplace(trimmed, std::regex::icase);
+    } catch (const std::regex_error&) {
+        fallback_needle_ = to_lower(trimmed);
+    }
+}
+
+bool CompiledArticleFilter::matches(const std::string& title, const std::string& author) const {
+    if (empty_) return true;
+
+    if (fuzzy_) {
+        std::string haystack = to_lower(title + " " + author);
+        for (const auto& term : terms_) {
+            if (haystack.find(term) == std::string::npos) {
                 return false;
             }
         }
         return true;
     }
 
-    try {
-        std::regex re(trimmed, std::regex::icase);
-        return std::regex_search(title, re) || std::regex_search(author, re);
-    } catch (const std::regex_error&) {
-        std::string needle = to_lower(trimmed);
-        return to_lower(title).find(needle) != std::string::npos ||
-               to_lower(author).find(needle) != std::string::npos;
+    if (regex_) {
+        return std::regex_search(title, *regex_) || std::regex_search(author, *regex_);
     }
+    return to_lower(title).find(fallback_needle_) != std::string::npos ||
+           to_lower(author).find(fallback_needle_) != std::string::npos;
+}
+
+bool matches_article_filter(const std::string& title,
+                            const std::string& author,
+                            const std::string& query,
+                            bool fuzzy_search) {
+    return CompiledArticleFilter(query, fuzzy_search).matches(title, author);
 }
 
 BuildResult build_book_epub(

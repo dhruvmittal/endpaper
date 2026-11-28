@@ -17,12 +17,15 @@
 #include <unordered_set>
 #include <vector>
 
+class QAction;
 class QButtonGroup;
 class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QMenu;
+class QMenuBar;
 class QProgressBar;
 class QPushButton;
 class QSplitter;
@@ -47,6 +50,7 @@ struct ArticleRow {
     std::string url;
     std::string html_body;
     bool selected = false;
+    int64_t timestamp = 0;
 };
 
 /// Table model holding fetched articles for one source (KMail, Miniflux, or RSS).
@@ -77,6 +81,7 @@ public:
 
     [[nodiscard]] const ArticleRow* rowAt(int sourceRow) const;
     [[nodiscard]] int selectedCount() const { return m_selectedCount; }
+    [[nodiscard]] std::vector<int> selectedSourceRows() const;
     [[nodiscard]] std::vector<StageItem> selectedItems() const;
     [[nodiscard]] std::optional<StageItem> stageItemAt(int sourceRow) const;
 
@@ -115,6 +120,7 @@ private:
 
     QString m_filterString;
     bool m_fuzzySearch = true;
+    CompiledArticleFilter m_compiledFilter;
 };
 
 /// Keyboard-first 3-pane desktop workspace matching the Endpaper TUI workflow.
@@ -145,6 +151,8 @@ public:
     [[nodiscard]] QToolBar* mainToolBar() const { return m_toolBar; }
     [[nodiscard]] QComboBox* bookCombo() const { return m_bookCombo; }
     [[nodiscard]] QToolButton* queueToggleButton() const { return m_queueToggleBtn; }
+    [[nodiscard]] QToolButton* menuButton() const { return m_menuBtn; }
+    [[nodiscard]] bool hasGlobalMenu() const { return m_hasGlobalMenu; }
     [[nodiscard]] QWidget* queuePane() const { return m_queuePane; }
     [[nodiscard]] QLabel* articleEmptyLabel() const { return m_articleEmptyLabel; }
     [[nodiscard]] QLabel* chapterEmptyLabel() const { return m_chapterEmptyLabel; }
@@ -192,11 +200,17 @@ private slots:
 
 private:
     void setupUi();
+    void buildToolBar();
+    void buildMenuBar();
+    QWidget* buildSourcesPane();
+    QWidget* buildArticlesPane();
+    QWidget* buildQueuePane();
     void setupShortcuts();
+    void setQueueVisible(bool visible);
+    void showAboutDialog();
     void loadCachedMetadata();
     void setFolders(std::vector<FolderInfo> folders);
     void rebuildKMailFolderTree();
-    [[nodiscard]] std::vector<int64_t> collectSubtreeIds(int64_t rootId) const;
     void loadCategoriesIntoList(const std::vector<MinifluxCategory>& categories);
     void loadRssFeedsIntoList();
     void maybeAutoFetchActiveSource();
@@ -207,7 +221,7 @@ private:
     void fetchMinifluxEntries();
     void fetchRssEntries(int64_t feedId);
 
-    void stageItems(int sourceIndex, std::vector<StageItem> items);
+    void stageItems(int sourceIndex, std::vector<StageItem> items, std::vector<int> checkedRowsToClear = {});
 
     void setStatus(const QString& msg, bool isError = false);
     void setBusy(bool busy);
@@ -259,15 +273,41 @@ private:
     FolderPrefs m_folderPrefs;
     std::unordered_set<int64_t> m_expandedFolders;
 
-    // Toolbar
+    // Toolbar & Menus
+    bool m_hasGlobalMenu = false;
     QToolBar* m_toolBar = nullptr;
     QButtonGroup* m_sourceBtnGroup = nullptr;
     std::array<QToolButton*, 3> m_sourceBtns{nullptr, nullptr, nullptr};
+    QToolButton* m_menuBtn = nullptr;
+    QAction* m_menuBtnAction = nullptr;
+    QMenu* m_hamburgerMenu = nullptr;
     QComboBox* m_bookCombo = nullptr;
     QToolButton* m_newBookBtn = nullptr;
     QToolButton* m_delBookBtn = nullptr;
     QToolButton* m_queueToggleBtn = nullptr;
     QToolButton* m_settingsBtn = nullptr;
+
+    QAction* m_actNewBook = nullptr;
+    QAction* m_actRefresh = nullptr;
+    QAction* m_actBuild = nullptr;
+    QAction* m_actChooseOutput = nullptr;
+    QAction* m_actQuit = nullptr;
+    QAction* m_actFilter = nullptr;
+    QAction* m_actSelectAll = nullptr;
+    QAction* m_actSelectNone = nullptr;
+    QAction* m_actStage = nullptr;
+    std::array<QAction*, 3> m_actSources{nullptr, nullptr, nullptr};
+    QAction* m_actToggleQueue = nullptr;
+    QAction* m_actManageFolders = nullptr;
+    QAction* m_actChUp = nullptr;
+    QAction* m_actChDown = nullptr;
+    QAction* m_actChSort = nullptr;
+    QAction* m_actChReverse = nullptr;
+    QAction* m_actChRemove = nullptr;
+    QAction* m_actChClear = nullptr;
+    QAction* m_actDelBook = nullptr;
+    QAction* m_actSettings = nullptr;
+    QAction* m_actAbout = nullptr;
 
     // Central splitter & Left sources pane
     QSplitter* m_splitter = nullptr;

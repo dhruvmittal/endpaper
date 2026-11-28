@@ -1,6 +1,7 @@
 #include "build_pipeline.h"
 #include "config.h"
 #include "database.h"
+#include "http_client.h"
 
 #include <QBuffer>
 #include <QColor>
@@ -85,6 +86,30 @@ void test_article_filter() {
     assert(!matches_article_filter("Issue #42: Systems", "Editor", R"(^editor$)", true));
     // Malformed regex while typing falls back to substring
     assert(matches_article_filter("Vector[int] Guide", "Dev", "vector[", false));
+
+    // Precompiled filter matches same semantics
+    CompiledArticleFilter cf_fuzzy("jane rust", true);
+    assert(cf_fuzzy.matches("Rust Async Patterns", "Jane Doe"));
+    assert(!cf_fuzzy.matches("Python Async", "Jane Doe"));
+
+    CompiledArticleFilter cf_regex(R"(issue\s+#\d+)", false);
+    assert(cf_regex.matches("Issue #42: Systems", "Editor"));
+    assert(!cf_regex.matches("No match here", "Editor"));
+
+    CompiledArticleFilter cf_bad("vector[", false);
+    assert(cf_bad.matches("Vector[int] Guide", "Dev"));
+
+    // Immediate HTTP cancelation when cancel_flag is set
+    std::atomic<bool> canceled{true};
+    HttpOptions opts;
+    opts.cancel_flag = &canceled;
+    bool threw_cancel = false;
+    try {
+        (void)http_get("https://example.com", opts);
+    } catch (const std::runtime_error&) {
+        threw_cancel = true;
+    }
+    assert(threw_cancel);
 }
 
 void test_config_legacy_migration_int64_and_perms() {

@@ -150,6 +150,14 @@ void test_list_books_chapter_count_and_move_chapter() {
     assert(db.move_chapter(b1, id_a, -1) == false);
     chs = db.get_chapters(b1);
     assert(chs[0].subject == "A" && chs[1].subject == "B" && chs[2].subject == "C");
+
+    // Transactional batch reorder
+    db.reorder_chapters({chs[2].id, chs[0].id, chs[1].id});
+    chs = db.get_chapters(b1);
+    assert(chs.size() == 3);
+    assert(chs[0].subject == "C" && chs[0].sort_order == 1);
+    assert(chs[1].subject == "A" && chs[1].sort_order == 2);
+    assert(chs[2].subject == "B" && chs[2].sort_order == 3);
 }
 
 void test_folder_hierarchy_migration_and_prefs() {

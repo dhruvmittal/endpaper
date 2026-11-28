@@ -164,6 +164,7 @@ if (BUILD_GUI)
 
     target_compile_options(endpaper-qt PRIVATE -Wall -Wextra -Wpedantic)
     install(TARGETS endpaper-qt DESTINATION bin)
+    install(FILES data/page.codeberg.gnuslashdhruv.endpaper-qt.desktop DESTINATION share/applications)
 endif()
 
 # ── Tests ──────────────────────────────────────────────────────────────────

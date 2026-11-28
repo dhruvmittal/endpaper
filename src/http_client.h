@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@ struct HttpOptions {
     std::string user_agent =
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Endpaper/0.1";
+    const std::atomic<bool>* cancel_flag = nullptr;
 };
 
 struct HttpResponse {

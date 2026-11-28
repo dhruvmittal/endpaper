@@ -9,14 +9,20 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
+#include <QPushButton>
 #include <QTableView>
+#include <QThread>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 
 #include <cassert>
 #include <cstdlib>
@@ -96,11 +102,22 @@ int main(int argc, char* argv[]) {
     window.show();
     QApplication::processEvents();
 
-    // ── Toolbar Layout & Queue Toggle ────────────────────────────────────
+    // ── Toolbar Layout, Global Menu vs Hamburger Fallback & Queue Toggle ──
     QToolBar* tb = window.mainToolBar();
     QToolButton* queueBtn = window.queueToggleButton();
+    QToolButton* menuBtn = window.menuButton();
     QComboBox* bookCombo = window.bookCombo();
-    assert(tb && queueBtn && bookCombo);
+    assert(tb && queueBtn && menuBtn && bookCombo);
+    if (window.hasGlobalMenu()) {
+        // Qt hides the in-window QMenuBar widget itself once a native QPlatformMenuBar takes over
+        assert(window.menuBar()->isNativeMenuBar());
+        assert(window.menuBar()->actions().size() == 6);
+        assert(!menuBtn->isVisibleTo(tb));
+    } else {
+        assert(window.menuBar()->isHidden());
+        assert(menuBtn->isVisibleTo(tb));
+        assert(menuBtn->menu() != nullptr);
+    }
     assert(bookCombo->x() + bookCombo->width() < queueBtn->x());
     for (QObject* child : tb->children()) {
         if (auto* w = qobject_cast<QWidget*>(child); w && w != queueBtn && w->isVisibleTo(tb)) {
@@ -220,6 +237,47 @@ int main(int argc, char* argv[]) {
     window.setActiveSource(1);
     assert(window.filterEdit()->text() == "mf_query");
 
+    // ── Chronological RFC 2822 Date Sort & Checkmark Clear After Staging ──
+    window.setActiveSource(0);
+    window.filterEdit()->clear();
+    {
+        std::vector<ArticleRow> dateRows = {
+            {101, "Mon Post", "A", "Mon, 23 Nov 2026 10:00:00 +0000", "", "<p>m</p>", false},
+            {102, "Wed Post", "B", "Wed, 18 Nov 2026 10:00:00 +0000", "", "<p>w</p>", false},
+            {103, "Fri Post", "C", "Fri, 20 Nov 2026 10:00:00 +0000", "", "<p>f</p>", false},
+        };
+        window.articleModel(0)->setArticles(dateRows);
+        window.articleProxy()->sort(ArticleTableModel::DateColumn, Qt::AscendingOrder);
+        assert(window.articleProxy()->rowCount() == 3);
+        assert(window.articleProxy()->index(0, ArticleTableModel::TitleColumn).data().toString() == "Wed Post");
+        assert(window.articleProxy()->index(1, ArticleTableModel::TitleColumn).data().toString() == "Fri Post");
+        assert(window.articleProxy()->index(2, ArticleTableModel::TitleColumn).data().toString() == "Mon Post");
+
+        int prevChapters = window.chapterCount();
+        window.articleModel(0)->setRowsSelected({0, 1}, true);
+        assert(window.articleModel(0)->selectedCount() == 2);
+        QPushButton* stageBtn = nullptr;
+        for (auto* b : window.findChildren<QPushButton*>()) {
+            if (b->text().startsWith("Stage")) {
+                stageBtn = b;
+                break;
+            }
+        }
+        assert(stageBtn && stageBtn->isEnabled() && stageBtn->text() == "Stage → (2)");
+        stageBtn->click();
+
+        QElapsedTimer timer;
+        timer.start();
+        while ((window.articleModel(0)->selectedCount() > 0 || window.chapterCount() < prevChapters + 2) &&
+               timer.elapsed() < 3000) {
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(10);
+        }
+        assert(window.articleModel(0)->selectedCount() == 0);
+        assert(window.chapterCount() == prevChapters + 2);
+        assert(stageBtn->text() == "Stage → (0)");
+    }
+
     // ── KMail Folder Tree, Pinned Group & Visibility Dialog ───────────────
     std::vector<FolderInfo> testFolders = {
         {1, -1, "Local Folders", "Local Folders"},
@@ -241,12 +299,13 @@ int main(int argc, char* argv[]) {
     assert(!kmailTree->topLevelItem(0)->isExpanded());
     assert(!kmailTree->topLevelItem(1)->isExpanded());
 
-    // Pin Newsletters (12) -> "Pinned" section appears first with Newsletters child
+    // Pin Newsletters (12) -> "Pinned" section appears first with Newsletters + account name
     window.setFolderPinned(12, true);
     assert(kmailTree->topLevelItemCount() == 3);
     assert(kmailTree->topLevelItem(0)->text(0) == "Pinned");
     assert(kmailTree->topLevelItem(0)->childCount() == 1);
     assert(kmailTree->topLevelItem(0)->child(0)->data(0, Qt::UserRole).toLongLong() == 12);
+    assert(kmailTree->topLevelItem(0)->child(0)->text(0) == "Newsletters (IMAP (me))");
     assert(db.load_folder_prefs().pinned.count(12) == 1);
 
     // Hide Local Folders (1) -> account and children disappear and persist as hidden
@@ -268,8 +327,48 @@ int main(int argc, char* argv[]) {
         assert(prefs.hidden.count(12) == 0);
         assert(prefs.pinned.count(12) == 1);
     }
+    // FolderVisibilityDialog: unchecking sole subfolder Tech (13) must NOT hide parent Newsletters (12),
+    // and checking inbox (2) under hidden Local Folders (1) must unhide ancestor Local Folders (1)
+    {
+        auto findById = [](QTreeWidget* tree, int64_t id) -> QTreeWidgetItem* {
+            for (QTreeWidgetItemIterator it(tree); *it; ++it) {
+                if ((*it)->data(0, Qt::UserRole).toLongLong() == id) return *it;
+            }
+            return nullptr;
+        };
+
+        FolderVisibilityDialog visDlg(db, testFolders, &window);
+        QTreeWidget* visTree = visDlg.findChild<QTreeWidget*>();
+        assert(visTree);
+        QTreeWidgetItem* techItem = findById(visTree, 13);
+        assert(techItem);
+        techItem->setCheckState(0, Qt::Unchecked);
+        visDlg.saveAndAccept();
+
+        auto prefs = db.load_folder_prefs();
+        assert(prefs.hidden.count(13) == 1);
+        assert(prefs.hidden.count(12) == 0); // parent stays visible
+
+        // Reopen and re-save: parent Newsletters (12) must remain visible
+        FolderVisibilityDialog visDlg2(db, testFolders, &window);
+        visDlg2.saveAndAccept();
+        prefs = db.load_folder_prefs();
+        assert(prefs.hidden.count(13) == 1);
+        assert(prefs.hidden.count(12) == 0);
+
+        // Checking child (2) under hidden account (1) reveals ancestor (1)
+        FolderVisibilityDialog visDlg3(db, testFolders, &window);
+        QTreeWidget* visTree3 = visDlg3.findChild<QTreeWidget*>();
+        assert(visTree3);
+        QTreeWidgetItem* inboxItem = findById(visTree3, 2);
+        assert(inboxItem);
+        inboxItem->setCheckState(0, Qt::Checked);
+        visDlg3.saveAndAccept();
+        prefs = db.load_folder_prefs();
+        assert(prefs.hidden.count(1) == 0 && prefs.hidden.count(2) == 0);
+    }
     window.reloadKMailFolders();
-    assert(kmailTree->topLevelItemCount() == 2); // Pinned + IMAP (me)
+    assert(kmailTree->topLevelItemCount() == 3); // Pinned + Local Folders + IMAP (me)
 
     // ── SettingsDialog Instantiation ─────────────────────────────────────
     {

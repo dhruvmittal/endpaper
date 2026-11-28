@@ -42,6 +42,13 @@ bool apply_visibility_filter(QTreeWidgetItem* item, const QString& query) {
     return visible;
 }
 
+void set_subtree_check_state(QTreeWidgetItem* item, Qt::CheckState state) {
+    item->setCheckState(0, state);
+    for (int i = 0; i < item->childCount(); ++i) {
+        set_subtree_check_state(item->child(i), state);
+    }
+}
+
 } // namespace
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -70,6 +77,7 @@ FolderVisibilityDialog::FolderVisibilityDialog(Database& db,
     m_tree->setHeaderHidden(true);
     m_tree->setIndentation(16);
     m_tree->setUniformRowHeights(true);
+    connect(m_tree, &QTreeWidget::itemChanged, this, &FolderVisibilityDialog::onTreeItemChanged);
     layout->addWidget(m_tree, 1);
 
     auto* quickRow = new QHBoxLayout();
@@ -96,6 +104,7 @@ FolderVisibilityDialog::FolderVisibilityDialog(Database& db,
 }
 
 void FolderVisibilityDialog::buildTree(const std::vector<FolderInfo>& folders, const FolderPrefs& prefs) {
+    m_updatingChecks = true;
     m_tree->clear();
 
     std::unordered_map<int64_t, const FolderInfo*> infoById;
@@ -103,17 +112,6 @@ void FolderVisibilityDialog::buildTree(const std::vector<FolderInfo>& folders, c
     for (const auto& f : folders) {
         infoById.emplace(f.collection_id, &f);
     }
-
-    auto isEffectivelyHidden = [&](int64_t id) {
-        int64_t cur = id;
-        for (int depth = 0; depth < 32 && cur != -1; ++depth) {
-            if (prefs.hidden.count(cur)) return true;
-            auto it = infoById.find(cur);
-            if (it == infoById.end()) break;
-            cur = it->second->parent_id;
-        }
-        return false;
-    };
 
     std::unordered_map<int64_t, QTreeWidgetItem*> itemMap;
     itemMap.reserve(folders.size());
@@ -141,27 +139,47 @@ void FolderVisibilityDialog::buildTree(const std::vector<FolderInfo>& folders, c
         }
     }
 
-    // Set tri-state flags once children exist, then set leaf check states bottom-up
+    const Qt::ItemFlags flags = Qt::ItemIsUserCheckable | Qt::ItemIsEnabled | Qt::ItemIsSelectable;
     for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
         QTreeWidgetItem* item = *it;
-        Qt::ItemFlags f = Qt::ItemIsUserCheckable | Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-        if (item->childCount() > 0) {
-            f |= Qt::ItemIsAutoTristate;
-        }
-        item->setFlags(f);
-    }
-
-    for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
-        QTreeWidgetItem* item = *it;
-        if (item->childCount() == 0) {
-            int64_t cid = item->data(0, Qt::UserRole).toLongLong();
-            item->setCheckState(0, isEffectivelyHidden(cid) ? Qt::Unchecked : Qt::Checked);
-        }
+        item->setFlags(flags);
+        int64_t cid = item->data(0, Qt::UserRole).toLongLong();
+        item->setCheckState(0, is_folder_hidden(cid, infoById, prefs.hidden) ? Qt::Unchecked : Qt::Checked);
     }
 
     for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
         m_tree->topLevelItem(i)->setExpanded(true);
     }
+    m_updatingChecks = false;
+}
+
+void FolderVisibilityDialog::onTreeItemChanged(QTreeWidgetItem* item, int column) {
+    if (m_updatingChecks || column != 0 || !item) return;
+    m_updatingChecks = true;
+
+    if (item->checkState(0) == Qt::Unchecked) {
+        set_subtree_check_state(item, Qt::Unchecked);
+    } else if (item->checkState(0) == Qt::Checked) {
+        for (QTreeWidgetItem* p = item->parent(); p != nullptr; p = p->parent()) {
+            if (p->checkState(0) != Qt::Checked) {
+                p->setCheckState(0, Qt::Checked);
+            }
+        }
+        if (item->childCount() > 0) {
+            bool allChildrenUnchecked = true;
+            for (int i = 0; i < item->childCount(); ++i) {
+                if (item->child(i)->checkState(0) != Qt::Unchecked) {
+                    allChildrenUnchecked = false;
+                    break;
+                }
+            }
+            if (allChildrenUnchecked) {
+                set_subtree_check_state(item, Qt::Checked);
+            }
+        }
+    }
+
+    m_updatingChecks = false;
 }
 
 void FolderVisibilityDialog::applyFilter(const QString& query) {
@@ -172,29 +190,31 @@ void FolderVisibilityDialog::applyFilter(const QString& query) {
 }
 
 void FolderVisibilityDialog::showAll() {
+    m_updatingChecks = true;
     for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
-        if ((*it)->childCount() == 0) {
-            (*it)->setCheckState(0, Qt::Checked);
-        }
+        (*it)->setCheckState(0, Qt::Checked);
     }
+    m_updatingChecks = false;
 }
 
 void FolderVisibilityDialog::hideAll() {
+    m_updatingChecks = true;
     for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
-        if ((*it)->childCount() == 0) {
-            (*it)->setCheckState(0, Qt::Unchecked);
-        }
+        (*it)->setCheckState(0, Qt::Unchecked);
     }
+    m_updatingChecks = false;
 }
 
 void FolderVisibilityDialog::hideSystemFolders() {
+    m_updatingChecks = true;
     for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
         QTreeWidgetItem* item = *it;
         std::string name = item->data(0, Qt::UserRole + 1).toString().toStdString();
         if (is_system_mail_folder(name)) {
-            item->setCheckState(0, Qt::Unchecked);
+            set_subtree_check_state(item, Qt::Unchecked);
         }
     }
+    m_updatingChecks = false;
 }
 
 void FolderVisibilityDialog::collectHidden(QTreeWidgetItem* item,
@@ -426,25 +446,14 @@ void SettingsDialog::updateFolderCountLabel() {
         return;
     }
     FolderPrefs prefs = m_db.load_folder_prefs();
-    std::unordered_map<int64_t, int64_t> parentMap;
-    parentMap.reserve(m_folders.size());
+    std::unordered_map<int64_t, const FolderInfo*> byId;
+    byId.reserve(m_folders.size());
     for (const auto& f : m_folders) {
-        parentMap.emplace(f.collection_id, f.parent_id);
+        byId.emplace(f.collection_id, &f);
     }
     int visible = 0;
     for (const auto& f : m_folders) {
-        bool hidden = false;
-        int64_t cur = f.collection_id;
-        for (int depth = 0; depth < 32 && cur != -1; ++depth) {
-            if (prefs.hidden.count(cur)) {
-                hidden = true;
-                break;
-            }
-            auto it = parentMap.find(cur);
-            if (it == parentMap.end()) break;
-            cur = it->second;
-        }
-        if (!hidden) ++visible;
+        if (!is_folder_hidden(f.collection_id, byId, prefs.hidden)) ++visible;
     }
     m_folderCountLabel->setText(QString("%1 of %2 visible").arg(visible).arg(m_folders.size()));
 }

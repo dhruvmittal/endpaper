@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -147,6 +148,22 @@ struct BuildResult {
     std::string_view raw_data,
     int max_width = 480,
     int jpeg_quality = 75);
+
+/// Precompiled article search filter (fuzzy word tokens or compiled regex).
+class CompiledArticleFilter {
+public:
+    CompiledArticleFilter() = default;
+    CompiledArticleFilter(const std::string& query, bool fuzzy_search);
+
+    [[nodiscard]] bool matches(const std::string& title, const std::string& author) const;
+
+private:
+    bool empty_ = true;
+    bool fuzzy_ = true;
+    std::vector<std::string> terms_;
+    std::optional<std::regex> regex_;
+    std::string fallback_needle_;
+};
 
 /// Match an article's title/author against a search query in fuzzy or regex mode.
 [[nodiscard]] bool matches_article_filter(const std::string& title,

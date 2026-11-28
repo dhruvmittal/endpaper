@@ -8,6 +8,9 @@
 #include "rss_fetcher.h"
 
 #include <QApplication>
+#include <QGuiApplication>
+#include <QIcon>
+#include <QStandardPaths>
 
 int main(int argc, char* argv[]) {
     endpaper::init_http_client();
@@ -17,6 +20,15 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName("Endpaper");
     app.setOrganizationDomain("endpaper.local");
     app.setApplicationVersion("0.1.0");
+
+    const QString desktopId = QStringLiteral("page.codeberg.gnuslashdhruv.endpaper-qt");
+    if (!QStandardPaths::locate(QStandardPaths::ApplicationsLocation,
+                                desktopId + QStringLiteral(".desktop")).isEmpty()) {
+        QGuiApplication::setDesktopFileName(desktopId);
+    }
+    app.setWindowIcon(QIcon::fromTheme(
+        QStringLiteral("accessories-ebook-reader"),
+        QIcon::fromTheme(QStringLiteral("application-epub+zip"))));
 
     endpaper::Config config;
     endpaper::Database db(config.db_path());

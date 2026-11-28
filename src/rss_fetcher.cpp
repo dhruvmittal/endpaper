@@ -86,10 +86,13 @@ std::vector<RssItem> parse_xml_doc(const pugi::xml_document& doc, size_t max_ite
 
 } // namespace
 
-std::future<std::vector<RssItem>> RssFetcher::fetch_items(const std::string& url, size_t max_items) {
-    return std::async(std::launch::async, [url, max_items]() -> std::vector<RssItem> {
+std::future<std::vector<RssItem>> RssFetcher::fetch_items(const std::string& url,
+                                                          size_t max_items,
+                                                          const std::atomic<bool>* cancel_flag) {
+    return std::async(std::launch::async, [url, max_items, cancel_flag]() -> std::vector<RssItem> {
         HttpOptions opts;
         opts.user_agent = "Endpaper/0.1 (RSS Fetcher; libcurl)";
+        opts.cancel_flag = cancel_flag;
         HttpResponse resp = http_get(url, opts);
         if (resp.status_code != 200) {
             throw std::runtime_error("RSS HTTP " + std::to_string(resp.status_code) + " for " + url);

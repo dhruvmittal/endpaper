@@ -125,7 +125,12 @@
                 "xdg-run/dconf"
                 "xdg-config/kdeglobals:ro"
               ];
-              talk-names = [ "org.freedesktop.Akonadi" "org.freedesktop.Notifications" ];
+              talk-names = [
+                "org.freedesktop.Akonadi"
+                "org.freedesktop.Notifications"
+                "com.canonical.AppMenu.Registrar"
+                "org.kde.kappmenu"
+              ];
               devices = [ "dri" ];
             };
             skipAbiChecks = true;

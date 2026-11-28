@@ -65,6 +65,7 @@ public:
                      const std::string& content_html, int sort_order);
     [[nodiscard]] std::vector<Chapter> get_chapters(int64_t book_id);
     void update_sort_order(int64_t chapter_id, int new_order);
+    void reorder_chapters(const std::vector<int64_t>& chapter_ids);
     bool move_chapter(int64_t book_id, int64_t chapter_id, int delta);
     void delete_chapter(int64_t chapter_id);
     void delete_all_chapters(int64_t book_id);

@@ -110,8 +110,8 @@ struct AkonadiFetcher::Impl {
             return plain_text_to_html(
                 text_part->decodedText().toStdString());
         }
-        // Last resort: raw decoded body
-        return msg->decodedText().toStdString();
+        // Last resort: raw decoded body (escape HTML metacharacters cleanly)
+        return plain_text_to_html(msg->decodedText().toStdString());
     }
 };
 
@@ -192,6 +192,59 @@ bool is_system_mail_folder(const std::string& name) {
         "junk", "junk email", "junk e-mail", "spam", "bulk mail"
     };
     return kSystemFolders.find(lower) != kSystemFolders.end();
+}
+
+bool is_folder_hidden(int64_t collection_id,
+                      const std::unordered_map<int64_t, const FolderInfo*>& by_id,
+                      const std::unordered_set<int64_t>& hidden) {
+    int64_t cur = collection_id;
+    for (int depth = 0; depth < 32 && cur != -1; ++depth) {
+        if (hidden.count(cur)) return true;
+        auto it = by_id.find(cur);
+        if (it == by_id.end()) break;
+        int64_t parent = it->second->parent_id;
+        if (parent == cur) break;
+        cur = parent;
+    }
+    return false;
+}
+
+std::vector<int64_t> collect_folder_subtree_ids(int64_t root_id,
+                                                const std::vector<FolderInfo>& folders) {
+    std::unordered_map<int64_t, std::vector<int64_t>> by_parent;
+    for (const auto& f : folders) {
+        if (f.parent_id != -1 && f.parent_id != f.collection_id) {
+            by_parent[f.parent_id].push_back(f.collection_id);
+        }
+    }
+    std::vector<int64_t> out;
+    std::unordered_set<int64_t> seen;
+    std::vector<int64_t> stack{root_id};
+    while (!stack.empty()) {
+        int64_t cur = stack.back();
+        stack.pop_back();
+        if (!seen.insert(cur).second) continue;
+        out.push_back(cur);
+        if (auto it = by_parent.find(cur); it != by_parent.end()) {
+            for (int64_t ch : it->second) stack.push_back(ch);
+        }
+    }
+    return out;
+}
+
+std::string folder_account_name(int64_t collection_id,
+                                const std::unordered_map<int64_t, const FolderInfo*>& by_id) {
+    int64_t cur = collection_id;
+    const FolderInfo* root = nullptr;
+    for (int depth = 0; depth < 32 && cur != -1; ++depth) {
+        auto it = by_id.find(cur);
+        if (it == by_id.end()) break;
+        root = it->second;
+        int64_t parent = it->second->parent_id;
+        if (parent == cur) break;
+        cur = parent;
+    }
+    return (root && root->collection_id != collection_id) ? root->name : "";
 }
 
 std::future<std::vector<FolderInfo>> AkonadiFetcher::fetch_folders() {

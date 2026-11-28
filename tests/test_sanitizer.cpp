@@ -308,6 +308,17 @@ void test_ensure_xhtml_quote_aware_gt() {
     assert(xhtml.find("<img title=\"a > b\" src=\"x.jpg\"/>") != std::string::npos);
 }
 
+void test_leading_whitespace_in_urls() {
+    std::string input =
+        "<p><a href=\" https://example.com/post \">Good</a>"
+        "<a href=\"   javascript:alert(1)\">Bad</a>"
+        "<img src=\"\thttps://example.com/pic.jpg\"></p>";
+    std::string result = sanitize_html(input, /*keep_images=*/true);
+    assert(result.find("https://example.com/post") != std::string::npos);
+    assert(result.find("https://example.com/pic.jpg") != std::string::npos);
+    assert(result.find("javascript:") == std::string::npos);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -340,6 +351,7 @@ int main() {
     TEST(test_frameset_null_body_safe);
     TEST(test_strips_meta_and_link_tags);
     TEST(test_ensure_xhtml_quote_aware_gt);
+    TEST(test_leading_whitespace_in_urls);
 
     std::cout << "\n✓ All sanitizer tests passed!\n";
     return 0;

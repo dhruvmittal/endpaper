@@ -21,7 +21,6 @@ public:
     [[nodiscard]] std::filesystem::path data_dir() const;
     [[nodiscard]] std::filesystem::path db_path() const;
     [[nodiscard]] std::filesystem::path state_dir() const;
-    [[nodiscard]] std::filesystem::path log_path() const;
 
     [[nodiscard]] std::string get(const std::string& section,
                                   const std::string& key,

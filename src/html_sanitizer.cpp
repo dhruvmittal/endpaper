@@ -23,9 +23,13 @@ std::string to_lower_ascii(std::string s) {
 }
 
 bool is_safe_protocol(const std::string& url) {
-    if (url.empty()) return true;
+    size_t start = 0;
+    while (start < url.size() && static_cast<unsigned char>(url[start]) <= 0x20) {
+        ++start;
+    }
+    if (start >= url.size()) return true;
 
-    std::string lower_url = to_lower_ascii(url);
+    std::string lower_url = to_lower_ascii(url.substr(start));
     if (lower_url.find(':') == std::string::npos) return true;
 
     return (lower_url.rfind("http://", 0) == 0 ||

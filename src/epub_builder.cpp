@@ -70,7 +70,7 @@ std::string EpubBuilder::make_container_xml() {
 
 std::string EpubBuilder::make_content_opf(const EpubMetadata& meta,
                                           int chapter_count,
-                                          const std::vector<std::string>& image_paths) {
+                                          const std::vector<ManifestItem>& extra_items) {
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
     std::tm tm_buf{};
@@ -102,11 +102,14 @@ std::string EpubBuilder::make_content_opf(const EpubMetadata& meta,
             << ".xhtml\" media-type=\"application/xhtml+xml\"/>\n";
     }
 
-    for (const auto& path : image_paths) {
-        std::string id = path;
-        std::replace(id.begin(), id.end(), '/', '_');
-        std::replace(id.begin(), id.end(), '.', '_');
-        opf << "    <item id=\"" << id << "\" href=\"" << path << "\" media-type=\"image/jpeg\"/>\n";
+    for (const auto& item : extra_items) {
+        opf << "    <item id=\"" << xml_escape(item.id)
+            << "\" href=\"" << xml_escape(item.href)
+            << "\" media-type=\"" << xml_escape(item.media_type) << "\"";
+        if (!item.properties.empty()) {
+            opf << " properties=\"" << xml_escape(item.properties) << "\"";
+        }
+        opf << "/>\n";
     }
 
     opf << R"(  </manifest>
@@ -266,14 +269,30 @@ img {
 
 // ── libzip helper: add a string as a file entry ──────────────────────────
 
+static std::string make_manifest_id(const std::string& href,
+                                    std::unordered_set<std::string>& used_ids) {
+    std::string base = href;
+    std::replace(base.begin(), base.end(), '/', '_');
+    std::replace(base.begin(), base.end(), '.', '_');
+    if (base.empty()) base = "item";
+    std::string candidate = base;
+    int suffix = 2;
+    while (!used_ids.insert(candidate).second) {
+        candidate = base + "_" + std::to_string(suffix++);
+    }
+    return candidate;
+}
+
 static void zip_add_string(zip_t* archive, const char* entry_name,
                             const std::string& content,
                             bool store = false) {
-    char* buf = static_cast<char*>(malloc(content.size()));
+    char* buf = static_cast<char*>(malloc(std::max<size_t>(1, content.size())));
     if (!buf) {
         throw std::runtime_error("malloc failed for zip entry");
     }
-    std::memcpy(buf, content.data(), content.size());
+    if (!content.empty()) {
+        std::memcpy(buf, content.data(), content.size());
+    }
 
     zip_source_t* src = zip_source_buffer(archive, buf, content.size(), 1);
     if (!src) {
@@ -319,13 +338,17 @@ void EpubBuilder::build(const fs::path& output_path,
         zip_add_string(archive, "mimetype", "application/epub+zip", true);
         zip_add_string(archive, "META-INF/container.xml", make_container_xml());
         
-        std::vector<std::string> image_paths;
+        std::vector<ManifestItem> extra_items;
+        extra_items.reserve(images.size());
+        std::unordered_set<std::string> used_ids;
         for (const auto& kv : images) {
-            image_paths.push_back(kv.first);
+            extra_items.push_back(ManifestItem{
+                make_manifest_id(kv.first, used_ids), kv.first, "image/jpeg", ""
+            });
         }
 
         zip_add_string(archive, "OEBPS/content.opf",
-                       make_content_opf(meta, static_cast<int>(chapters.size()), image_paths));
+                       make_content_opf(meta, static_cast<int>(chapters.size()), extra_items));
         zip_add_string(archive, "OEBPS/toc.xhtml", make_toc_xhtml(meta.title, chapters));
         zip_add_string(archive, "OEBPS/style.css", make_stylesheet());
 
@@ -394,19 +417,31 @@ void EpubBuilder::append(const fs::path& epub_path,
         std::string id_str = meta_node.child("dc:identifier").text().get();
         if (id_str.find("urn:uuid:") == 0) meta.uuid = id_str.substr(9);
 
-        // Count existing chapters and images
+        // Count existing chapters and preserve non-chapter manifest items (images, etc.)
         pugi::xml_node manifest = pkg.child("manifest");
         int existing_chapters = 0;
-        std::vector<std::string> all_image_paths;
+        std::vector<ManifestItem> all_extra_items;
         std::unordered_set<std::string> existing_images;
+        std::unordered_set<std::string> used_ids;
         int next_img_idx = 0;
 
         for (pugi::xml_node item : manifest.children("item")) {
             std::string href = item.attribute("href").value();
-            if (href.find("chapter_") == 0) {
+            if (href.rfind("chapter_", 0) == 0) {
                 existing_chapters++;
-            } else if (item.attribute("media-type").as_string() == std::string("image/jpeg")) {
-                all_image_paths.push_back(href);
+            } else if (href != "toc.xhtml" && href != "style.css") {
+                std::string id = item.attribute("id").as_string();
+                if (id.empty() || !used_ids.insert(id).second) {
+                    id = make_manifest_id(href, used_ids);
+                }
+                std::string media_type = item.attribute("media-type").as_string();
+                if (media_type.empty()) media_type = "application/octet-stream";
+                all_extra_items.push_back(ManifestItem{
+                    std::move(id),
+                    href,
+                    std::move(media_type),
+                    item.attribute("properties").as_string()
+                });
                 existing_images.insert(href);
                 // Track highest images/img_<N>.jpg index to avoid filename collisions
                 const std::string prefix = "images/img_";
@@ -440,7 +475,9 @@ void EpubBuilder::append(const fs::path& epub_path,
                 renames.emplace_back(kv.first, target_path);
             }
             existing_images.insert(target_path);
-            all_image_paths.push_back(target_path);
+            all_extra_items.push_back(ManifestItem{
+                make_manifest_id(target_path, used_ids), target_path, "image/jpeg", ""
+            });
             entries_to_add.emplace_back(target_path, kv.second);
         }
 
@@ -483,7 +520,7 @@ void EpubBuilder::append(const fs::path& epub_path,
 
         // Update content.opf and toc.xhtml
         int total_chapters = existing_chapters + static_cast<int>(chapters_copy.size());
-        zip_add_string(archive, "OEBPS/content.opf", make_content_opf(meta, total_chapters, all_image_paths));
+        zip_add_string(archive, "OEBPS/content.opf", make_content_opf(meta, total_chapters, all_extra_items));
 
         // Read old TOC to get titles
         std::string toc_str = read_entry("OEBPS/toc.xhtml");

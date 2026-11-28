@@ -45,10 +45,13 @@ bool json_bool(const json& obj, const char* key, bool def = false) {
     return def;
 }
 
-std::string miniflux_get(const std::string& url, const std::string& token) {
+std::string miniflux_get(const std::string& url,
+                         const std::string& token,
+                         const std::atomic<bool>* cancel_flag = nullptr) {
     HttpOptions opts;
     opts.headers = {"X-Auth-Token: " + token};
     opts.user_agent = "Endpaper/0.1 (Miniflux Fetcher; libcurl)";
+    opts.cancel_flag = cancel_flag;
 
     HttpResponse resp = http_get(url, opts);
     if (resp.status_code != 200) {
@@ -86,12 +89,13 @@ void MinifluxFetcher::set_credentials(const std::string& server_url, const std::
     d->token = token;
 }
 
-std::future<std::vector<MinifluxCategory>> MinifluxFetcher::fetch_categories() {
+std::future<std::vector<MinifluxCategory>> MinifluxFetcher::fetch_categories(
+    const std::atomic<bool>* cancel_flag) {
     auto [server_url, token] = d->credentials();
     std::string url = server_url + "/v1/categories?counts=true";
 
-    return std::async(std::launch::async, [url, token]() -> std::vector<MinifluxCategory> {
-        std::string buffer = miniflux_get(url, token);
+    return std::async(std::launch::async, [url, token, cancel_flag]() -> std::vector<MinifluxCategory> {
+        std::string buffer = miniflux_get(url, token, cancel_flag);
         try {
             auto j = json::parse(buffer);
             if (!j.is_array()) {
@@ -113,11 +117,13 @@ std::future<std::vector<MinifluxCategory>> MinifluxFetcher::fetch_categories() {
     });
 }
 
-std::future<std::vector<MinifluxEntry>> MinifluxFetcher::fetch_entries(const FetchParams& params) {
+std::future<std::vector<MinifluxEntry>> MinifluxFetcher::fetch_entries(
+    const FetchParams& params,
+    const std::atomic<bool>* cancel_flag) {
     auto [server_url, token] = d->credentials();
     std::string base_url = server_url + "/v1/entries";
 
-    return std::async(std::launch::async, [base_url, token, params]() -> std::vector<MinifluxEntry> {
+    return std::async(std::launch::async, [base_url, token, params, cancel_flag]() -> std::vector<MinifluxEntry> {
         std::stringstream url;
         url << base_url << "?direction=desc&limit=100";
         if (params.category_id != -1) url << "&category_id=" << params.category_id;
@@ -125,7 +131,7 @@ std::future<std::vector<MinifluxEntry>> MinifluxFetcher::fetch_entries(const Fet
         if (params.starred) url << "&starred=true";
         if (!params.search.empty()) url << "&search=" << url_escape(params.search);
 
-        std::string buffer = miniflux_get(url.str(), token);
+        std::string buffer = miniflux_get(url.str(), token, cancel_flag);
         try {
             auto j = json::parse(buffer);
             if (!j.contains("entries") || !j["entries"].is_array()) {
@@ -160,12 +166,14 @@ std::future<std::vector<MinifluxEntry>> MinifluxFetcher::fetch_entries(const Fet
     });
 }
 
-std::future<std::string> MinifluxFetcher::fetch_original_content(int64_t entry_id) {
+std::future<std::string> MinifluxFetcher::fetch_original_content(
+    int64_t entry_id,
+    const std::atomic<bool>* cancel_flag) {
     auto [server_url, token] = d->credentials();
     std::string url = server_url + "/v1/entries/" + std::to_string(entry_id) + "/fetch-content";
 
-    return std::async(std::launch::async, [url, token]() -> std::string {
-        std::string buffer = miniflux_get(url, token);
+    return std::async(std::launch::async, [url, token, cancel_flag]() -> std::string {
+        std::string buffer = miniflux_get(url, token, cancel_flag);
         try {
             auto j = json::parse(buffer);
             return json_str(j, "content");

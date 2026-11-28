@@ -30,6 +30,11 @@ size_t write_cb(void* contents, size_t size, size_t nmemb, void* userp) {
     return realsize;
 }
 
+int xferinfo_cb(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    const auto* cancel = static_cast<const std::atomic<bool>*>(clientp);
+    return (cancel && cancel->load()) ? 1 : 0;
+}
+
 std::string to_lower_ascii(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -45,6 +50,10 @@ void init_http_client() {
 }
 
 HttpResponse http_get(const std::string& url, const HttpOptions& opts) {
+    if (opts.cancel_flag && opts.cancel_flag->load()) {
+        throw std::runtime_error("Request canceled");
+    }
+
     init_http_client();
 
     CURL* curl = curl_easy_init();
@@ -75,6 +84,11 @@ HttpResponse http_get(const std::string& url, const HttpOptions& opts) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, opts.user_agent.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    if (opts.cancel_flag) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool>*>(opts.cancel_flag));
+    }
 
     CURLcode res = curl_easy_perform(curl);
     long status_code = 0;
@@ -88,6 +102,9 @@ HttpResponse http_get(const std::string& url, const HttpOptions& opts) {
 
     if (state.overflow) {
         throw std::runtime_error("Response exceeded max size limit for " + url);
+    }
+    if (res == CURLE_ABORTED_BY_CALLBACK) {
+        throw std::runtime_error("Request canceled");
     }
     if (res != CURLE_OK) {
         throw std::runtime_error(std::string("Network error: ") + curl_easy_strerror(res));

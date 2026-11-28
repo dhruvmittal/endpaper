@@ -45,7 +45,6 @@ fs::path Config::config_file() const { return config_dir_ / "endpaper.conf"; }
 fs::path Config::data_dir()    const { return data_dir_; }
 fs::path Config::db_path()     const { return data_dir_ / "library.db"; }
 fs::path Config::state_dir()   const { return state_dir_; }
-fs::path Config::log_path()    const { return state_dir_ / "error.log"; }
 
 // ── Config value access ───────────────────────────────────────────────────
 std::string Config::get_unlocked(const std::string& section,

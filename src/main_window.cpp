@@ -3,10 +3,14 @@
 #include "settings_dialog.h"
 
 #include <QAbstractItemView>
+#include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QDateTime>
 #include <QFileDialog>
 #include <QFont>
 #include <QFormLayout>
@@ -21,6 +25,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QProgressBar>
@@ -63,18 +68,30 @@ std::vector<MinifluxCategory> with_all_category(const std::vector<MinifluxCatego
 }
 
 template <typename ModelPtr>
-StubResolver make_resolver(int sourceIndex, ModelPtr mfFetcher, HtmlExtractor* htmlExtractor) {
+StubResolver make_resolver(int sourceIndex,
+                           ModelPtr mfFetcher,
+                           HtmlExtractor* htmlExtractor,
+                           const std::atomic<bool>* cancelFlag) {
     if (sourceIndex == 1) {
-        return [mfFetcher](const StageItem& it) {
-            return mfFetcher->fetch_original_content(it.source_id).get();
+        return [mfFetcher, cancelFlag](const StageItem& it) {
+            return mfFetcher->fetch_original_content(it.source_id, cancelFlag).get();
         };
     }
     if (sourceIndex == 2) {
-        return [htmlExtractor](const StageItem& it) {
-            return it.url.empty() ? std::string{} : htmlExtractor->fetch_and_extract(it.url).get();
+        return [htmlExtractor, cancelFlag](const StageItem& it) {
+            return it.url.empty() ? std::string{} : htmlExtractor->fetch_and_extract(it.url, cancelFlag).get();
         };
     }
     return {};
+}
+
+int64_t parseArticleTimestamp(const std::string& raw) {
+    QString s = QString::fromStdString(raw).trimmed();
+    if (s.isEmpty()) return 0;
+    QDateTime dt = QDateTime::fromString(s, Qt::RFC2822Date);
+    if (!dt.isValid()) dt = QDateTime::fromString(s, Qt::ISODateWithMs);
+    if (!dt.isValid()) dt = QDateTime::fromString(s, Qt::ISODate);
+    return dt.isValid() ? dt.toMSecsSinceEpoch() : 0;
 }
 
 QString semanticColorStyle(const QPalette& pal, bool isError, bool isPositive) {
@@ -217,7 +234,10 @@ void ArticleTableModel::setArticles(std::vector<ArticleRow> rows) {
     beginResetModel();
     m_rows = std::move(rows);
     m_selectedCount = 0;
-    for (const auto& r : m_rows) {
+    for (auto& r : m_rows) {
+        if (r.timestamp == 0 && !r.date.empty()) {
+            r.timestamp = parseArticleTimestamp(r.date);
+        }
         if (r.selected) ++m_selectedCount;
     }
     endResetModel();
@@ -272,6 +292,17 @@ const ArticleRow* ArticleTableModel::rowAt(int sourceRow) const {
     return &m_rows[static_cast<size_t>(sourceRow)];
 }
 
+std::vector<int> ArticleTableModel::selectedSourceRows() const {
+    std::vector<int> rows;
+    rows.reserve(static_cast<size_t>(std::max(0, m_selectedCount)));
+    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
+        if (m_rows[static_cast<size_t>(i)].selected) {
+            rows.push_back(i);
+        }
+    }
+    return rows;
+}
+
 std::vector<StageItem> ArticleTableModel::selectedItems() const {
     std::vector<StageItem> out;
     out.reserve(static_cast<size_t>(std::max(0, m_selectedCount)));
@@ -309,12 +340,18 @@ void ArticleFilterProxy::refreshFilter(Fn&& update) {
 
 void ArticleFilterProxy::setFilterString(const QString& query) {
     if (m_filterString == query) return;
-    refreshFilter([&]() { m_filterString = query; });
+    refreshFilter([&]() {
+        m_filterString = query;
+        m_compiledFilter = CompiledArticleFilter(m_filterString.toStdString(), m_fuzzySearch);
+    });
 }
 
 void ArticleFilterProxy::setFuzzySearch(bool fuzzy) {
     if (m_fuzzySearch == fuzzy) return;
-    refreshFilter([&]() { m_fuzzySearch = fuzzy; });
+    refreshFilter([&]() {
+        m_fuzzySearch = fuzzy;
+        m_compiledFilter = CompiledArticleFilter(m_filterString.toStdString(), m_fuzzySearch);
+    });
 }
 
 std::vector<int> ArticleFilterProxy::visibleSourceRows() const {
@@ -332,7 +369,7 @@ bool ArticleFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex&) con
     if (!model) return false;
     const ArticleRow* row = model->rowAt(sourceRow);
     if (!row) return false;
-    return matches_article_filter(row->title, row->author, m_filterString.toStdString(), m_fuzzySearch);
+    return m_compiledFilter.matches(row->title, row->author);
 }
 
 bool ArticleFilterProxy::lessThan(const QModelIndex& left, const QModelIndex& right) const {
@@ -348,6 +385,7 @@ bool ArticleFilterProxy::lessThan(const QModelIndex& left, const QModelIndex& ri
         case ArticleTableModel::AuthorColumn:
             return QString::fromStdString(a->author).compare(QString::fromStdString(b->author), Qt::CaseInsensitive) < 0;
         case ArticleTableModel::DateColumn:
+            if (a->timestamp != b->timestamp) return a->timestamp < b->timestamp;
             return a->date < b->date;
         default:
             return left.row() < right.row();
@@ -410,7 +448,6 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::setupUi() {
-    // ── Models ───────────────────────────────────────────────────────────
     for (int i = 0; i < 3; ++i) {
         m_articleModels[i] = new ArticleTableModel(this);
         connect(m_articleModels[i], &ArticleTableModel::selectionChanged,
@@ -420,7 +457,39 @@ void MainWindow::setupUi() {
     m_articleProxy->setFuzzySearch(fuzzySearch());
     m_articleProxy->setSourceModel(m_articleModels[0]);
 
-    // ── Top Toolbar ──────────────────────────────────────────────────────
+    buildToolBar();
+
+    m_splitter = new QSplitter(Qt::Horizontal, this);
+    m_splitter->setChildrenCollapsible(false);
+    m_splitter->addWidget(buildSourcesPane());
+    m_splitter->addWidget(buildArticlesPane());
+    m_splitter->addWidget(buildQueuePane());
+    m_splitter->setStretchFactor(0, 0);
+    m_splitter->setStretchFactor(1, 1);
+    m_splitter->setStretchFactor(2, 0);
+    m_splitter->setSizes({220, 580, 320});
+    setCentralWidget(m_splitter);
+
+    m_statusLabel = new QLabel("Ready", this);
+    statusBar()->addWidget(m_statusLabel, 1);
+
+    m_busyBar = new QProgressBar(this);
+    m_busyBar->setRange(0, 0);
+    m_busyBar->setFixedWidth(110);
+    m_busyBar->setTextVisible(false);
+    m_busyBar->setVisible(false);
+    statusBar()->addPermanentWidget(m_busyBar);
+
+    auto* hintLabel = new QLabel(
+        " Ctrl+1–3 Source | Ctrl+F Filter | Space Check | Ctrl+Enter Stage | Ctrl+B Build | Ctrl+, Settings ",
+        this);
+    hintLabel->setEnabled(false);
+    statusBar()->addPermanentWidget(hintLabel);
+
+    buildMenuBar();
+}
+
+void MainWindow::buildToolBar() {
     m_toolBar = addToolBar("Workspace");
     m_toolBar->setObjectName("mainToolbar");
     m_toolBar->setMovable(false);
@@ -466,6 +535,16 @@ void MainWindow::setupUi() {
     connect(m_settingsBtn, &QToolButton::clicked, this, &MainWindow::openSettings);
     m_toolBar->addWidget(m_settingsBtn);
 
+    m_menuBtn = new QToolButton(this);
+    m_menuBtn->setText("Menu");
+    m_menuBtn->setAccessibleName("Application menu");
+    m_menuBtn->setIcon(QIcon::fromTheme(QStringLiteral("application-menu")));
+    m_menuBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_menuBtn->setPopupMode(QToolButton::InstantPopup);
+    m_menuBtn->setToolTip("Application menu");
+    m_menuBtn->setAutoRaise(true);
+    m_menuBtnAction = m_toolBar->addWidget(m_menuBtn);
+
     m_toolBar->addSeparator();
     m_toolBar->addWidget(new QLabel(" Book: ", this));
 
@@ -506,12 +585,9 @@ void MainWindow::setupUi() {
     m_queueToggleBtn->setChecked(true);
     m_queueToggleBtn->setToolTip("Show or hide book queue sidebar (Ctrl+\\, F4)");
     m_toolBar->addWidget(m_queueToggleBtn);
+}
 
-    // ── Central 3-Pane Splitter ──────────────────────────────────────────
-    m_splitter = new QSplitter(Qt::Horizontal, this);
-    m_splitter->setChildrenCollapsible(false);
-
-    // ── Pane 1: Sources ──────────────────────────────────────────────────
+QWidget* MainWindow::buildSourcesPane() {
     auto* sourcesPane = new QWidget(m_splitter);
     sourcesPane->setMinimumWidth(190);
     auto* sourcesLayout = new QVBoxLayout(sourcesPane);
@@ -654,8 +730,10 @@ void MainWindow::setupUi() {
 
     m_sourceStack->addWidget(rssContainer);
     sourcesLayout->addWidget(m_sourceStack, 1);
+    return sourcesPane;
+}
 
-    // ── Pane 2: Articles ─────────────────────────────────────────────────
+QWidget* MainWindow::buildArticlesPane() {
     auto* articlesPane = new QWidget(m_splitter);
     articlesPane->setMinimumWidth(340);
     auto* articlesLayout = new QVBoxLayout(articlesPane);
@@ -757,24 +835,23 @@ void MainWindow::setupUi() {
     connect(m_articleProxy, &QAbstractItemModel::modelReset, this, &MainWindow::updateEmptyPlaceholders);
     connect(m_articleProxy, &QAbstractItemModel::layoutChanged, this, &MainWindow::updateEmptyPlaceholders);
     articlesLayout->addWidget(m_articleView, 1);
+    return articlesPane;
+}
 
-    // ── Pane 3: Book Queue & Build ───────────────────────────────────────
+QWidget* MainWindow::buildQueuePane() {
     m_queuePane = new QWidget(m_splitter);
     m_queuePane->setMinimumWidth(260);
     auto* queueLayout = new QVBoxLayout(m_queuePane);
     queueLayout->setContentsMargins(4, 6, 6, 6);
     queueLayout->setSpacing(6);
 
-    connect(m_queueToggleBtn, &QToolButton::toggled, this, [this](bool visible) {
-        m_queuePane->setVisible(visible);
-        m_queueToggleBtn->setIcon(QIcon::fromTheme(
-            visible ? QStringLiteral("sidebar-collapse-right")
-                    : QStringLiteral("sidebar-expand-right")));
-    });
+    connect(m_queueToggleBtn, &QToolButton::toggled, this, &MainWindow::setQueueVisible);
 
     auto* chHdrRow = new QHBoxLayout();
     chHdrRow->setSpacing(2);
     m_chapterHeaderLabel = new QLabel("Chapters (0)", m_queuePane);
+    QFont hdrFont = m_chapterHeaderLabel->font();
+    hdrFont.setBold(true);
     m_chapterHeaderLabel->setFont(hdrFont);
 
     auto makeChBtn = [this](const char* iconName, const char* accessibleName, const char* tip) {
@@ -899,66 +976,190 @@ void MainWindow::setupUi() {
     buildLayout->addWidget(m_buildBtn);
 
     queueLayout->addWidget(buildBox);
+    return m_queuePane;
+}
 
-    m_splitter->addWidget(sourcesPane);
-    m_splitter->addWidget(articlesPane);
-    m_splitter->addWidget(m_queuePane);
-    m_splitter->setStretchFactor(0, 0);
-    m_splitter->setStretchFactor(1, 1);
-    m_splitter->setStretchFactor(2, 0);
-    m_splitter->setSizes({220, 580, 320});
-    setCentralWidget(m_splitter);
+void MainWindow::buildMenuBar() {
+    auto addAct = [this](QMenu* menu,
+                         const QString& text,
+                         const char* iconName,
+                         const QList<QKeySequence>& shortcuts,
+                         auto handler) -> QAction* {
+        QAction* act = menu->addAction(QIcon::fromTheme(QString::fromLatin1(iconName)), text);
+        if (!shortcuts.isEmpty()) {
+            act->setShortcuts(shortcuts);
+            act->setShortcutContext(Qt::WindowShortcut);
+            addAction(act);
+        }
+        connect(act, &QAction::triggered, this, std::move(handler));
+        return act;
+    };
 
-    // ── Bottom Status Bar ────────────────────────────────────────────────
-    m_statusLabel = new QLabel("Ready", this);
-    statusBar()->addWidget(m_statusLabel, 1);
+    auto* fileMenu = new QMenu("&File", this);
+    m_actNewBook = addAct(fileMenu, "&New Book…", "document-new",
+                          {QKeySequence(Qt::CTRL | Qt::Key_N)},
+                          [this]() { createBookInteractive(); });
+    m_actRefresh = addAct(fileMenu, "&Refresh Source", "view-refresh",
+                          {QKeySequence(Qt::CTRL | Qt::Key_R), QKeySequence(Qt::Key_F5)},
+                          [this]() { refreshCurrentSource(); });
+    fileMenu->addSeparator();
+    m_actBuild = addAct(fileMenu, "&Build EPUB", "run-build",
+                        {QKeySequence(Qt::CTRL | Qt::Key_B)},
+                        [this]() { buildEpubAction(); });
+    m_actChooseOutput = addAct(fileMenu, "Choose &Output Folder…", "folder-open", {},
+                               [this]() { browseBuildOutputFolder(); });
+    fileMenu->addSeparator();
+    m_actQuit = addAct(fileMenu, "&Quit", "application-exit",
+                       {QKeySequence(Qt::CTRL | Qt::Key_Q)},
+                       [this]() { close(); });
 
-    m_busyBar = new QProgressBar(this);
-    m_busyBar->setRange(0, 0);
-    m_busyBar->setFixedWidth(110);
-    m_busyBar->setTextVisible(false);
-    m_busyBar->setVisible(false);
-    statusBar()->addPermanentWidget(m_busyBar);
+    auto* editMenu = new QMenu("&Edit", this);
+    m_actFilter = addAct(editMenu, "&Filter Articles", "edit-find",
+                         {QKeySequence::Find},
+                         [this]() {
+                             m_filterEdit->setFocus();
+                             m_filterEdit->selectAll();
+                         });
+    editMenu->addSeparator();
+    m_actSelectAll = addAct(editMenu, "Select &All Visible", "edit-select-all", {}, [this]() {
+        m_articleModels[m_activeSource]->setRowsSelected(m_articleProxy->visibleSourceRows(), true);
+    });
+    m_actSelectNone = addAct(editMenu, "Select &None", "edit-select-none", {}, [this]() {
+        m_articleModels[m_activeSource]->setRowsSelected(m_articleProxy->visibleSourceRows(), false);
+    });
+    m_actStage = addAct(editMenu, "&Stage Selected", "mail-forward",
+                        {QKeySequence(Qt::CTRL | Qt::Key_Return), QKeySequence(Qt::CTRL | Qt::Key_Enter)},
+                        [this]() { stageSelectedOrHighlighted(); });
 
-    auto* hintLabel = new QLabel(
-        " Ctrl+1–3 Source | Ctrl+F Filter | Space Check | Ctrl+Enter Stage | Ctrl+B Build | Ctrl+, Settings ",
-        this);
-    hintLabel->setEnabled(false);
-    statusBar()->addPermanentWidget(hintLabel);
+    auto* viewMenu = new QMenu("&View", this);
+    auto* sourceGroup = new QActionGroup(this);
+    sourceGroup->setExclusive(true);
+    struct SourceEntry {
+        const char* label;
+        const char* icon;
+        QKeyCombination primary;
+        Qt::Key fnKey;
+    };
+    static const SourceEntry kSourceEntries[3] = {
+        {"&KMail", "mail-folder-inbox", Qt::CTRL | Qt::Key_1, Qt::Key_F1},
+        {"&Miniflux", "view-web-browser-dom-tree", Qt::CTRL | Qt::Key_2, Qt::Key_F2},
+        {"&RSS", "application-rss+xml", Qt::CTRL | Qt::Key_3, Qt::Key_F3},
+    };
+    for (int i = 0; i < 3; ++i) {
+        QAction* srcAct = addAct(viewMenu, QString::fromLatin1(kSourceEntries[i].label),
+                                 kSourceEntries[i].icon,
+                                 {QKeySequence(kSourceEntries[i].primary), QKeySequence(kSourceEntries[i].fnKey)},
+                                 [this, i]() { setActiveSource(i); });
+        srcAct->setCheckable(true);
+        srcAct->setChecked(i == m_activeSource);
+        sourceGroup->addAction(srcAct);
+        m_actSources[i] = srcAct;
+    }
+    viewMenu->addSeparator();
+    m_actToggleQueue = viewMenu->addAction(
+        QIcon::fromTheme(QStringLiteral("sidebar-collapse-right")),
+        "Show Book &Queue Sidebar");
+    m_actToggleQueue->setCheckable(true);
+    m_actToggleQueue->setChecked(m_queuePane->isVisible());
+    m_actToggleQueue->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Backslash), QKeySequence(Qt::Key_F4)});
+    m_actToggleQueue->setShortcutContext(Qt::WindowShortcut);
+    addAction(m_actToggleQueue);
+    connect(m_actToggleQueue, &QAction::toggled, this, &MainWindow::setQueueVisible);
+
+    viewMenu->addSeparator();
+    m_actManageFolders = addAct(viewMenu, "Manage Visible KMail &Folders…", "view-filter", {},
+                                [this]() { openFolderVisibilityDialog(); });
+
+    auto* bookMenu = new QMenu("&Book", this);
+    m_actChUp = addAct(bookMenu, "Move Chapter &Up", "go-up", {},
+                       [this]() { moveChapterByDelta(-1); });
+    m_actChDown = addAct(bookMenu, "Move Chapter &Down", "go-down", {},
+                         [this]() { moveChapterByDelta(+1); });
+    m_actChSort = addAct(bookMenu, "&Auto-Sort Chapters", "view-sort-ascending", {},
+                         [this]() { autoSortChapters(); });
+    m_actChReverse = addAct(bookMenu, "&Reverse Chapter Order", "object-flip-vertical", {},
+                            [this]() { reverseChapterOrder(); });
+    bookMenu->addSeparator();
+    m_actChRemove = addAct(bookMenu, "Remove Selected &Chapter", "edit-delete", {},
+                           [this]() { deleteSelectedChapter(); });
+    m_actChClear = addAct(bookMenu, "&Clear All Chapters…", "edit-clear-all", {},
+                          [this]() { clearAllChaptersInteractive(); });
+    bookMenu->addSeparator();
+    m_actDelBook = addAct(bookMenu, "&Delete Active Book…", "edit-delete", {},
+                          [this]() { deleteActiveBookInteractive(); });
+
+    QList<QKeySequence> settingsSeqs{QKeySequence(Qt::CTRL | Qt::Key_Comma)};
+    for (const QKeySequence& seq : QKeySequence::keyBindings(QKeySequence::Preferences)) {
+        if (!seq.isEmpty() && !settingsSeqs.contains(seq)) {
+            settingsSeqs.append(seq);
+        }
+    }
+    auto* settingsMenu = new QMenu("&Settings", this);
+    m_actSettings = addAct(settingsMenu, "&Configure Endpaper…", "configure",
+                           settingsSeqs,
+                           [this]() { openSettings(); });
+
+    auto* helpMenu = new QMenu("&Help", this);
+    m_actAbout = addAct(helpMenu, "&About Endpaper", "help-about", {},
+                        [this]() { showAboutDialog(); });
+
+    QMenuBar* mb = menuBar();
+    m_hasGlobalMenu = (mb->platformMenuBar() != nullptr);
+    if (m_hasGlobalMenu) {
+        mb->addMenu(fileMenu);
+        mb->addMenu(editMenu);
+        mb->addMenu(viewMenu);
+        mb->addMenu(bookMenu);
+        mb->addMenu(settingsMenu);
+        mb->addMenu(helpMenu);
+        if (m_menuBtnAction) m_menuBtnAction->setVisible(false);
+    } else {
+        mb->hide();
+        m_hamburgerMenu = new QMenu(this);
+        m_hamburgerMenu->addMenu(fileMenu);
+        m_hamburgerMenu->addMenu(editMenu);
+        m_hamburgerMenu->addMenu(viewMenu);
+        m_hamburgerMenu->addMenu(bookMenu);
+        m_hamburgerMenu->addSeparator();
+        m_hamburgerMenu->addAction(m_actSettings);
+        m_hamburgerMenu->addAction(m_actAbout);
+        m_hamburgerMenu->addSeparator();
+        m_hamburgerMenu->addAction(m_actQuit);
+        m_menuBtn->setMenu(m_hamburgerMenu);
+        if (m_menuBtnAction) m_menuBtnAction->setVisible(true);
+    }
+}
+
+void MainWindow::setQueueVisible(bool visible) {
+    if (m_queuePane) m_queuePane->setVisible(visible);
+    if (m_queueToggleBtn) {
+        QSignalBlocker block(m_queueToggleBtn);
+        m_queueToggleBtn->setChecked(visible);
+        m_queueToggleBtn->setIcon(QIcon::fromTheme(
+            visible ? QStringLiteral("sidebar-collapse-right")
+                    : QStringLiteral("sidebar-expand-right")));
+    }
+    if (m_actToggleQueue) {
+        QSignalBlocker block(m_actToggleQueue);
+        m_actToggleQueue->setChecked(visible);
+    }
+}
+
+void MainWindow::showAboutDialog() {
+    QString ver = QCoreApplication::applicationVersion().toHtmlEscaped();
+    QString cfgPath = QString::fromStdString(m_config.config_file().string()).toHtmlEscaped();
+    QString dbPath = QString::fromStdString(m_config.db_path().string()).toHtmlEscaped();
+    QMessageBox::about(
+        this,
+        "About Endpaper",
+        QString("<p><b>Endpaper %1</b></p>"
+                "<p>Collect KMail emails, Miniflux entries, and RSS feeds into e-ink-friendly EPUB books.</p>"
+                "<p>Config: <code>%2</code><br/>Database: <code>%3</code></p>")
+            .arg(ver, cfgPath, dbPath));
 }
 
 void MainWindow::setupShortcuts() {
-    auto bind = [this](const QKeySequence& seq, auto fn) {
-        auto* sc = new QShortcut(seq, this);
-        sc->setContext(Qt::WindowShortcut);
-        connect(sc, &QShortcut::activated, this, fn);
-    };
-
-    bind(QKeySequence(Qt::Key_F1), [this]() { setActiveSource(0); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_1), [this]() { setActiveSource(0); });
-    bind(QKeySequence(Qt::Key_F2), [this]() { setActiveSource(1); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_2), [this]() { setActiveSource(1); });
-    bind(QKeySequence(Qt::Key_F3), [this]() { setActiveSource(2); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_3), [this]() { setActiveSource(2); });
-
-    bind(QKeySequence(Qt::Key_F4), [this]() { m_queueToggleBtn->toggle(); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_Backslash), [this]() { m_queueToggleBtn->toggle(); });
-    bind(QKeySequence(Qt::Key_F5), [this]() { refreshCurrentSource(); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_R), [this]() { refreshCurrentSource(); });
-
-    bind(QKeySequence::Find, [this]() {
-        m_filterEdit->setFocus();
-        m_filterEdit->selectAll();
-    });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_N), [this]() { createBookInteractive(); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_Return), [this]() { stageSelectedOrHighlighted(); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_Enter), [this]() { stageSelectedOrHighlighted(); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_B), [this]() { buildEpubAction(); });
-    bind(QKeySequence::Preferences, [this]() { openSettings(); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_Comma), [this]() { openSettings(); });
-    bind(QKeySequence(Qt::CTRL | Qt::Key_Q), [this]() { close(); });
-
-    // Widget-scoped shortcuts so Ctrl+A / Del don't break QLineEdits
+    // Widget-scoped shortcuts so Ctrl+A / Del / Alt+Arrows don't break QLineEdits
     auto* selectAllSc = new QShortcut(QKeySequence::SelectAll, m_articleView);
     selectAllSc->setContext(Qt::WidgetShortcut);
     connect(selectAllSc, &QShortcut::activated, this, [this]() {
@@ -1096,6 +1297,11 @@ void MainWindow::setBusy(bool busy) {
     m_refreshSourceBtn->setEnabled(!busy);
     m_rssToggleAddBtn->setEnabled(!busy);
     m_rssRemoveBtn->setEnabled(!busy && m_rssFeedList->currentItem() != nullptr);
+    if (m_actRefresh) m_actRefresh->setEnabled(!busy);
+    if (m_actManageFolders) m_actManageFolders->setEnabled(!busy && !m_allFolders.empty());
+    if (m_actChooseOutput) m_actChooseOutput->setEnabled(!busy);
+    if (m_actSelectAll) m_actSelectAll->setEnabled(!busy);
+    if (m_actSelectNone) m_actSelectNone->setEnabled(!busy);
     updateBookControlsState();
     updateChapterButtonsState();
     updateStageButtonLabel();
@@ -1158,6 +1364,9 @@ void MainWindow::setActiveSource(int index) {
     if (m_sourceBtns[m_activeSource]) {
         m_sourceBtns[m_activeSource]->setChecked(true);
     }
+    if (m_actSources[m_activeSource]) {
+        m_actSources[m_activeSource]->setChecked(true);
+    }
     m_sourceStack->setCurrentIndex(m_activeSource);
     m_mfFilterBar->setVisible(m_activeSource == 1);
     m_manageFoldersBtn->setVisible(m_activeSource == 0);
@@ -1215,29 +1424,8 @@ void MainWindow::reloadKMailFolders() {
 void MainWindow::setFolders(std::vector<FolderInfo> folders) {
     m_allFolders = std::move(folders);
     populate_folder_paths(m_allFolders);
+    if (m_actManageFolders) m_actManageFolders->setEnabled(!m_busy && !m_allFolders.empty());
     rebuildKMailFolderTree();
-}
-
-std::vector<int64_t> MainWindow::collectSubtreeIds(int64_t rootId) const {
-    std::unordered_map<int64_t, std::vector<int64_t>> childrenByParent;
-    for (const auto& f : m_allFolders) {
-        if (f.parent_id != -1 && f.parent_id != f.collection_id) {
-            childrenByParent[f.parent_id].push_back(f.collection_id);
-        }
-    }
-    std::vector<int64_t> result;
-    std::unordered_set<int64_t> seen;
-    std::vector<int64_t> stack{rootId};
-    while (!stack.empty()) {
-        int64_t cur = stack.back();
-        stack.pop_back();
-        if (!seen.insert(cur).second) continue;
-        result.push_back(cur);
-        if (auto it = childrenByParent.find(cur); it != childrenByParent.end()) {
-            for (int64_t ch : it->second) stack.push_back(ch);
-        }
-    }
-    return result;
 }
 
 void MainWindow::setFolderPinned(int64_t collectionId, bool pinned) {
@@ -1247,7 +1435,7 @@ void MainWindow::setFolderPinned(int64_t collectionId, bool pinned) {
 }
 
 void MainWindow::hideFolderSubtree(int64_t collectionId) {
-    auto ids = collectSubtreeIds(collectionId);
+    auto ids = collect_folder_subtree_ids(collectionId, m_allFolders);
     m_db.set_folders_hidden(ids, true);
     m_folderPrefs = m_db.load_folder_prefs();
     rebuildKMailFolderTree();
@@ -1263,23 +1451,13 @@ void MainWindow::rebuildKMailFolderTree() {
         byId.emplace(f.collection_id, &f);
     }
 
-    auto isHidden = [&](int64_t cid) {
-        int64_t cur = cid;
-        for (int depth = 0; depth < 32 && cur != -1; ++depth) {
-            if (m_folderPrefs.hidden.count(cur)) return true;
-            auto it = byId.find(cur);
-            if (it == byId.end()) break;
-            cur = it->second->parent_id;
-        }
-        return false;
-    };
-
     QTreeWidgetItem* currentMatch = nullptr;
 
     // 1. Pinned section at top
     std::vector<const FolderInfo*> pinnedFolders;
     for (const auto& f : m_allFolders) {
-        if (m_folderPrefs.pinned.count(f.collection_id) && !isHidden(f.collection_id)) {
+        if (m_folderPrefs.pinned.count(f.collection_id) &&
+            !is_folder_hidden(f.collection_id, byId, m_folderPrefs.hidden)) {
             pinnedFolders.push_back(&f);
         }
     }
@@ -1298,6 +1476,10 @@ void MainWindow::rebuildKMailFolderTree() {
             QString label = f->name.empty()
                 ? QString::fromStdString(f->full_path)
                 : QString::fromStdString(f->name);
+            std::string acct = folder_account_name(f->collection_id, byId);
+            if (!acct.empty()) {
+                label += QString(" (%1)").arg(QString::fromStdString(acct));
+            }
             child->setText(0, label);
             child->setToolTip(0, QString::fromStdString(f->full_path));
             child->setIcon(0, iconForFolder(f->name, false));
@@ -1313,7 +1495,7 @@ void MainWindow::rebuildKMailFolderTree() {
     // 2. Determine ancestor chain to auto-expand for last active non-pinned folder
     std::unordered_set<int64_t> autoExpandIds;
     if (m_lastKMailCollectionId != -1 &&
-        !isHidden(m_lastKMailCollectionId) &&
+        !is_folder_hidden(m_lastKMailCollectionId, byId, m_folderPrefs.hidden) &&
         !m_folderPrefs.pinned.count(m_lastKMailCollectionId)) {
         auto it = byId.find(m_lastKMailCollectionId);
         if (it != byId.end()) {
@@ -1331,7 +1513,7 @@ void MainWindow::rebuildKMailFolderTree() {
     std::unordered_map<int64_t, std::vector<const FolderInfo*>> childrenMap;
     std::vector<const FolderInfo*> roots;
     for (const auto& f : m_allFolders) {
-        if (isHidden(f.collection_id)) continue;
+        if (is_folder_hidden(f.collection_id, byId, m_folderPrefs.hidden)) continue;
         if (f.parent_id == -1 || f.parent_id == f.collection_id || byId.find(f.parent_id) == byId.end()) {
             roots.push_back(&f);
         } else {
@@ -1597,7 +1779,7 @@ void MainWindow::fetchMinifluxCategories() {
 
     m_workers.launch([this, shouldCache]() {
         try {
-            auto cats = m_minifluxFetcher.fetch_categories().get();
+            auto cats = m_minifluxFetcher.fetch_categories(m_workers.stop_flag()).get();
             if (m_workers.is_shutting_down()) return;
             if (shouldCache) m_db.save_category_cache(cats);
 
@@ -1645,7 +1827,7 @@ void MainWindow::fetchMinifluxEntries() {
 
     m_workers.launch([this, params]() {
         try {
-            auto entries = m_minifluxFetcher.fetch_entries(params).get();
+            auto entries = m_minifluxFetcher.fetch_entries(params, m_workers.stop_flag()).get();
             if (m_workers.is_shutting_down()) return;
 
             std::vector<ArticleRow> rows;
@@ -1697,7 +1879,7 @@ void MainWindow::fetchRssEntries(int64_t feedId) {
 
     m_workers.launch([this, url, maxItems]() {
         try {
-            auto entries = m_rssFetcher.fetch_items(url, maxItems).get();
+            auto entries = m_rssFetcher.fetch_items(url, maxItems, m_workers.stop_flag()).get();
             if (m_workers.is_shutting_down()) return;
 
             std::vector<ArticleRow> rows;
@@ -1785,11 +1967,14 @@ void MainWindow::updateStageButtonLabel() {
     m_stageBtn->setText(QString("Stage → (%1)").arg(count));
     bool hasSelectedOrFocused = count > 0 ||
         (m_articleView->selectionModel() && !m_articleView->selectionModel()->selectedRows(0).isEmpty());
-    m_stageBtn->setEnabled(!m_busy && m_selectedBookId != -1 && hasSelectedOrFocused);
+    bool enabled = !m_busy && m_selectedBookId != -1 && hasSelectedOrFocused;
+    m_stageBtn->setEnabled(enabled);
+    if (m_actStage) m_actStage->setEnabled(enabled);
 }
 
 void MainWindow::stageSelectedOrHighlighted() {
     if (m_busy) return;
+    auto checkedRows = m_articleModels[m_activeSource]->selectedSourceRows();
     auto items = m_articleModels[m_activeSource]->selectedItems();
     if (items.empty() && m_articleView->selectionModel()) {
         const auto rows = m_articleView->selectionModel()->selectedRows(0);
@@ -1800,7 +1985,7 @@ void MainWindow::stageSelectedOrHighlighted() {
             }
         }
     }
-    stageItems(m_activeSource, std::move(items));
+    stageItems(m_activeSource, std::move(items), std::move(checkedRows));
 }
 
 void MainWindow::onArticleDoubleClicked(const QModelIndex& proxyIndex) {
@@ -1811,7 +1996,9 @@ void MainWindow::onArticleDoubleClicked(const QModelIndex& proxyIndex) {
     }
 }
 
-void MainWindow::stageItems(int sourceIndex, std::vector<StageItem> items) {
+void MainWindow::stageItems(int sourceIndex,
+                            std::vector<StageItem> items,
+                            std::vector<int> checkedRowsToClear) {
     if (m_busy) return;
     if (m_selectedBookId == -1) {
         setStatus("Create or select a Book before staging.", true);
@@ -1827,14 +2014,15 @@ void MainWindow::stageItems(int sourceIndex, std::vector<StageItem> items) {
     opts.stub_char_threshold = static_cast<size_t>(std::max(0, m_config.get_int("fetching", "stub_char_threshold", 1000)));
     opts.request_delay_ms = std::max(0, m_config.get_int("fetching", "request_delay_ms", 1000));
 
-    StubResolver resolver = make_resolver(sourceIndex, &m_minifluxFetcher, &m_htmlExtractor);
+    StubResolver resolver = make_resolver(sourceIndex, &m_minifluxFetcher, &m_htmlExtractor, m_workers.stop_flag());
     int64_t bookId = m_selectedBookId;
     QString bookTitle = currentBookTitle();
 
     setBusy(true);
     setStatus(QString("Staging %1 article(s) into \"%2\"…").arg(items.size()).arg(bookTitle));
 
-    m_workers.launch([this, bookId, bookTitle, items = std::move(items),
+    m_workers.launch([this, sourceIndex, bookId, bookTitle, items = std::move(items),
+                      checkedRowsToClear = std::move(checkedRowsToClear),
                       opts, resolver = std::move(resolver)]() mutable {
         try {
             StageResult res = stage_articles(
@@ -1842,8 +2030,17 @@ void MainWindow::stageItems(int sourceIndex, std::vector<StageItem> items) {
                 [this](const std::string& msg) { setStatus(QString::fromStdString(msg)); },
                 m_workers.stop_flag());
 
-            QMetaObject::invokeMethod(this, [this, res, bookTitle]() {
+            QMetaObject::invokeMethod(this, [this, sourceIndex, res, bookTitle,
+                                             checkedRowsToClear = std::move(checkedRowsToClear)]() mutable {
                 if (m_workers.is_shutting_down()) return;
+                if (res.staged > 0 && !checkedRowsToClear.empty()) {
+                    if (static_cast<size_t>(res.staged) < checkedRowsToClear.size()) {
+                        checkedRowsToClear.resize(static_cast<size_t>(res.staged));
+                    }
+                    if (auto* model = articleModel(sourceIndex)) {
+                        model->setRowsSelected(checkedRowsToClear, false);
+                    }
+                }
                 refreshBooks();
                 QString summary = QString("Staged %1 article(s) into \"%2\"").arg(res.staged).arg(bookTitle);
                 if (res.stub_failures > 0) {
@@ -2045,14 +2242,15 @@ void MainWindow::syncDraggedChapterOrder() {
     if (m_busy || m_selectedBookId == -1) return;
     int count = m_chapterList->count();
     int selected = m_chapterList->currentRow();
+    std::vector<int64_t> ids;
+    ids.reserve(static_cast<size_t>(std::max(0, count)));
     for (int i = 0; i < count; ++i) {
         QListWidgetItem* item = m_chapterList->item(i);
         if (!item) continue;
         int64_t cid = item->data(Qt::UserRole).toLongLong();
-        if (cid > 0) {
-            m_db.update_sort_order(cid, i + 1);
-        }
+        if (cid > 0) ids.push_back(cid);
     }
+    m_db.reorder_chapters(ids);
     refreshChapters();
     if (selected >= 0 && selected < m_chapterList->count()) {
         m_chapterList->setCurrentRow(selected);
@@ -2061,10 +2259,14 @@ void MainWindow::syncDraggedChapterOrder() {
 
 void MainWindow::updateBookControlsState() {
     bool hasBook = (m_selectedBookId != -1);
+    bool canBuild = !m_busy && hasBook && !m_chapters.empty();
     m_bookCombo->setEnabled(!m_busy && !m_books.empty());
     m_newBookBtn->setEnabled(!m_busy);
     m_delBookBtn->setEnabled(!m_busy && hasBook);
-    m_buildBtn->setEnabled(!m_busy && hasBook && !m_chapters.empty());
+    m_buildBtn->setEnabled(canBuild);
+    if (m_actNewBook) m_actNewBook->setEnabled(!m_busy);
+    if (m_actDelBook) m_actDelBook->setEnabled(!m_busy && hasBook);
+    if (m_actBuild) m_actBuild->setEnabled(canBuild);
     updateStageButtonLabel();
 }
 
@@ -2072,12 +2274,23 @@ void MainWindow::updateChapterButtonsState() {
     int count = m_chapterList->count();
     int row = m_chapterList->currentRow();
     bool hasSelection = (row >= 0 && row < count);
-    m_chUpBtn->setEnabled(!m_busy && hasSelection && row > 0);
-    m_chDownBtn->setEnabled(!m_busy && hasSelection && row + 1 < count);
-    m_chSortBtn->setEnabled(!m_busy && count > 1);
-    m_chReverseBtn->setEnabled(!m_busy && count > 1);
-    m_chRemoveBtn->setEnabled(!m_busy && hasSelection);
-    m_chClearBtn->setEnabled(!m_busy && count > 0);
+    bool canUp = !m_busy && hasSelection && row > 0;
+    bool canDown = !m_busy && hasSelection && row + 1 < count;
+    bool canMulti = !m_busy && count > 1;
+    bool canRemove = !m_busy && hasSelection;
+    bool canClear = !m_busy && count > 0;
+    m_chUpBtn->setEnabled(canUp);
+    m_chDownBtn->setEnabled(canDown);
+    m_chSortBtn->setEnabled(canMulti);
+    m_chReverseBtn->setEnabled(canMulti);
+    m_chRemoveBtn->setEnabled(canRemove);
+    m_chClearBtn->setEnabled(canClear);
+    if (m_actChUp) m_actChUp->setEnabled(canUp);
+    if (m_actChDown) m_actChDown->setEnabled(canDown);
+    if (m_actChSort) m_actChSort->setEnabled(canMulti);
+    if (m_actChReverse) m_actChReverse->setEnabled(canMulti);
+    if (m_actChRemove) m_actChRemove->setEnabled(canRemove);
+    if (m_actChClear) m_actChClear->setEnabled(canClear);
 }
 
 // ── Build EPUB & Settings ────────────────────────────────────────────────────

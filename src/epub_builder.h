@@ -38,11 +38,18 @@ public:
                        const std::map<std::string, std::string>& images = {});
 
 private:
+    struct ManifestItem {
+        std::string id;
+        std::string href;
+        std::string media_type;
+        std::string properties;
+    };
+
     // EPUB 3.0 template generators
     static std::string make_container_xml();
     static std::string make_content_opf(const EpubMetadata& meta,
                                         int chapter_count,
-                                        const std::vector<std::string>& image_paths);
+                                        const std::vector<ManifestItem>& extra_items);
     static std::string make_toc_xhtml(const std::string& title,
                                       const std::vector<EpubChapter>& chapters,
                                       int start_index = 0);

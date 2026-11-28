@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Endpaper
+GenericName=Article-to-EPUB Archiver
+Comment=Collect emails, Miniflux, and RSS articles into e-ink EPUB books
+Exec=endpaper-qt
+Icon=accessories-ebook-reader
+Terminal=false
+Categories=Office;Publishing;News;Qt;KDE;
+StartupWMClass=endpaper-qt
+X-KDE-HasGlobalMenuBar=true

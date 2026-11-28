@@ -293,6 +293,49 @@ void test_append_cascading_image_collision() {
     assert(opf.find("href=\"images/img_3.jpg\"") != std::string::npos);
 }
 
+void test_append_preserves_non_jpeg_manifest_items_and_empty_entry() {
+    fs::path epub = TEST_DIR / "non_jpeg_cover.epub";
+    EpubMetadata meta{.title = "Cover Preserve", .author = "Author", .publisher = "Endpaper", .language = "en", .uuid = ""};
+    std::vector<EpubChapter> initial = {
+        {"Ch 1", "a@b.com", ""} // empty body tests zero-byte entry paths too
+    };
+    EpubBuilder::build(epub, meta, initial);
+
+    // Inject a PNG cover image with properties="cover-image" into the archive and content.opf
+    {
+        int err = 0;
+        zip_t* archive = zip_open(epub.c_str(), 0, &err);
+        assert(archive != nullptr);
+
+        std::string orig_opf = read_zip_file(epub, "OEBPS/content.opf");
+        size_t pos = orig_opf.find("</manifest>");
+        assert(pos != std::string::npos);
+        std::string extra =
+            "    <item id=\"cover_img\" href=\"images/cover.png\" "
+            "media-type=\"image/png\" properties=\"cover-image\"/>\n";
+        orig_opf.insert(pos, extra);
+
+        const char* png_bytes = "FAKEPNG";
+        zip_source_t* s_cover = zip_source_buffer(archive, png_bytes, 7, 0);
+        assert(s_cover && zip_file_add(archive, "OEBPS/images/cover.png", s_cover, ZIP_FL_OVERWRITE) >= 0);
+
+        zip_source_t* s_opf = zip_source_buffer(archive, orig_opf.data(), orig_opf.size(), 0);
+        assert(s_opf && zip_file_add(archive, "OEBPS/content.opf", s_opf, ZIP_FL_OVERWRITE) >= 0);
+        assert(zip_close(archive) == 0);
+    }
+
+    std::vector<EpubChapter> appended = {
+        {"Ch 2", "b@c.com", "<p>Body</p>"}
+    };
+    EpubBuilder::append(epub, appended);
+
+    std::string new_opf = read_zip_file(epub, "OEBPS/content.opf");
+    assert(new_opf.find("href=\"images/cover.png\"") != std::string::npos);
+    assert(new_opf.find("media-type=\"image/png\"") != std::string::npos);
+    assert(new_opf.find("properties=\"cover-image\"") != std::string::npos);
+    assert(zip_has_entry(epub, "OEBPS/images/cover.png"));
+}
+
 int main() {
     std::cout << "╔════════════════════════════════════════════════════╗\n";
     std::cout << "║  Endpaper — Comprehensive Append Tests             ║\n";
@@ -307,6 +350,7 @@ int main() {
     TEST(test_mimetype_first_and_stored);
     TEST(test_append_image_collision_renamed);
     TEST(test_append_cascading_image_collision);
+    TEST(test_append_preserves_non_jpeg_manifest_items_and_empty_entry);
 
     teardown();
 

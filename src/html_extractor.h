@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <future>
 #include <string>
 
@@ -13,7 +14,9 @@ public:
 
     /// Fetch and extract content from a URL.
     /// Returns a future that resolves to the extracted HTML fragment.
-    [[nodiscard]] std::future<std::string> fetch_and_extract(const std::string& url);
+    [[nodiscard]] std::future<std::string> fetch_and_extract(
+        const std::string& url,
+        const std::atomic<bool>* cancel_flag = nullptr);
 
     /// Static helper to extract content from an HTML string.
     /// Uses Lexbor DOM traversal and optionally resolves relative URLs against base_url.

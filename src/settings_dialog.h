@@ -32,6 +32,9 @@ public slots:
     void hideSystemFolders();
     void saveAndAccept();
 
+private slots:
+    void onTreeItemChanged(QTreeWidgetItem* item, int column);
+
 private:
     void buildTree(const std::vector<FolderInfo>& folders, const FolderPrefs& prefs);
     void applyFilter(const QString& query);
@@ -40,6 +43,7 @@ private:
     Database& m_db;
     QLineEdit* m_filterEdit = nullptr;
     QTreeWidget* m_tree = nullptr;
+    bool m_updatingChecks = false;
 };
 
 /// Compact modal dialog for editing persisted Endpaper preferences.

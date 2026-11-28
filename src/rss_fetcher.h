@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <future>
 #include <string>
 #include <vector>
@@ -23,7 +24,10 @@ public:
     /// Fetch items from a feed URL.
     /// Returns a future that resolves to the list of items.
     /// @param max_items Maximum articles to parse (0 = unlimited).
-    [[nodiscard]] std::future<std::vector<RssItem>> fetch_items(const std::string& url, size_t max_items = 0);
+    [[nodiscard]] std::future<std::vector<RssItem>> fetch_items(
+        const std::string& url,
+        size_t max_items = 0,
+        const std::atomic<bool>* cancel_flag = nullptr);
 
     /// Static helper for unit testing and internal parsing.
     /// @param max_items Maximum articles to parse (0 = unlimited).

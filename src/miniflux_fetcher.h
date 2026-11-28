@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include <future>
@@ -36,7 +37,8 @@ public:
     void set_credentials(const std::string& server_url, const std::string& token);
 
     /// Fetch all categories.
-    [[nodiscard]] std::future<std::vector<MinifluxCategory>> fetch_categories();
+    [[nodiscard]] std::future<std::vector<MinifluxCategory>> fetch_categories(
+        const std::atomic<bool>* cancel_flag = nullptr);
 
     /// Filtering parameters for fetching entries.
     struct FetchParams {
@@ -47,10 +49,14 @@ public:
     };
 
     /// Fetch entries matching the given parameters.
-    [[nodiscard]] std::future<std::vector<MinifluxEntry>> fetch_entries(const FetchParams& params);
+    [[nodiscard]] std::future<std::vector<MinifluxEntry>> fetch_entries(
+        const FetchParams& params,
+        const std::atomic<bool>* cancel_flag = nullptr);
 
     /// Fetch the original article content for a specific entry.
-    [[nodiscard]] std::future<std::string> fetch_original_content(int64_t entry_id);
+    [[nodiscard]] std::future<std::string> fetch_original_content(
+        int64_t entry_id,
+        const std::atomic<bool>* cancel_flag = nullptr);
 
 private:
     std::unique_ptr<MinifluxFetcherPrivate> d;

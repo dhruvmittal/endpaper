@@ -210,9 +210,13 @@ std::string serialize_inner_html(lxb_dom_node_t* parent) {
 
 } // namespace
 
-std::future<std::string> HtmlExtractor::fetch_and_extract(const std::string& url) {
-    return std::async(std::launch::async, [url]() -> std::string {
-        HttpResponse resp = http_get(url);
+std::future<std::string> HtmlExtractor::fetch_and_extract(
+    const std::string& url,
+    const std::atomic<bool>* cancel_flag) {
+    return std::async(std::launch::async, [url, cancel_flag]() -> std::string {
+        HttpOptions opts;
+        opts.cancel_flag = cancel_flag;
+        HttpResponse resp = http_get(url, opts);
         if (resp.status_code != 200) {
             throw std::runtime_error(
                 "Article fetch HTTP " + std::to_string(resp.status_code) + " for " + url);

@@ -74,8 +74,9 @@ void rebuild_filtered_view(
     view.source_indices.clear();
     view.labels.clear();
 
+    CompiledArticleFilter filter(query, fuzzy);
     for (size_t i = 0; i < items.size(); ++i) {
-        if (!matches_article_filter(items[i].title, items[i].author, query, fuzzy)) {
+        if (!filter.matches(items[i].title, items[i].author)) {
             continue;
         }
         view.source_indices.push_back(i);
@@ -318,6 +319,8 @@ void TuiApp::run() {
 
     // ── Shared staging helper ────────────────────────────────────────────
     auto run_stage = [&](std::vector<SelectableArticle>& items,
+                         FilteredView& view,
+                         const std::string& filter_query,
                          const std::string& label_noun,
                          StubResolver resolver) {
         if (is_busy()) {
@@ -330,9 +333,12 @@ void TuiApp::run() {
         }
 
         std::vector<StageItem> chosen;
-        for (const auto& a : items) {
+        std::vector<size_t> chosen_indices;
+        for (size_t idx = 0; idx < items.size(); ++idx) {
+            const auto& a = items[idx];
             if (!a.selected) continue;
             chosen.push_back(StageItem{a.title, a.author, a.html_body, a.source_id, a.url});
+            chosen_indices.push_back(idx);
         }
         if (chosen.empty()) {
             set_status("No articles selected.", true);
@@ -356,6 +362,7 @@ void TuiApp::run() {
         set_status("Staging " + std::to_string(chosen.size()) + " " + label_noun + "...");
 
         worker_pool.launch([&, target_book_id, book_name, chosen = std::move(chosen),
+                            chosen_indices = std::move(chosen_indices),
                             opts, resolver = std::move(resolver)]() mutable {
             try {
                 auto res = stage_articles(
@@ -365,8 +372,18 @@ void TuiApp::run() {
                     },
                     worker_pool.stop_flag());
 
-                run_on_ui([&, res, book_name]() {
+                run_on_ui([&, res, book_name, chosen_indices = std::move(chosen_indices)]() {
                     staging = false;
+                    if (res.staged > 0) {
+                        size_t limit = std::min(static_cast<size_t>(res.staged), chosen_indices.size());
+                        for (size_t i = 0; i < limit; ++i) {
+                            size_t item_idx = chosen_indices[i];
+                            if (item_idx < items.size()) {
+                                items[item_idx].selected = false;
+                            }
+                        }
+                        rebuild_filtered_view(items, filter_query, fuzzy_search, view);
+                    }
                     refresh_books();
                     std::string msg = "Staged " + std::to_string(res.staged) + " articles into \"" +
                                       (book_name.empty() ? "Book" : book_name) + "\"";
@@ -450,28 +467,6 @@ void TuiApp::run() {
     std::string kmail_filter;
     FilteredView kmail_view;
 
-    auto collect_kmail_subtree = [&](int64_t root_id) {
-        std::unordered_map<int64_t, std::vector<int64_t>> by_parent;
-        for (const auto& f : folders) {
-            if (f.parent_id != -1 && f.parent_id != f.collection_id) {
-                by_parent[f.parent_id].push_back(f.collection_id);
-            }
-        }
-        std::vector<int64_t> out;
-        std::unordered_set<int64_t> seen;
-        std::vector<int64_t> stack{root_id};
-        while (!stack.empty()) {
-            int64_t cur = stack.back();
-            stack.pop_back();
-            if (!seen.insert(cur).second) continue;
-            out.push_back(cur);
-            if (auto it = by_parent.find(cur); it != by_parent.end()) {
-                for (int64_t ch : it->second) stack.push_back(ch);
-            }
-        }
-        return out;
-    };
-
     auto rebuild_kmail_tree = [&](bool prefer_last = false) {
         populate_folder_paths(folders);
         folder_prefs = db_.load_folder_prefs();
@@ -487,14 +482,7 @@ void TuiApp::run() {
         for (const auto& f : folders) by_id.emplace(f.collection_id, &f);
 
         auto is_hidden = [&](int64_t cid) {
-            int64_t cur = cid;
-            for (int depth = 0; depth < 32 && cur != -1; ++depth) {
-                if (folder_prefs.hidden.count(cur)) return true;
-                auto it = by_id.find(cur);
-                if (it == by_id.end()) break;
-                cur = it->second->parent_id;
-            }
-            return false;
+            return is_folder_hidden(cid, by_id, folder_prefs.hidden);
         };
 
         if (!auto_expand_last_done && last_kmail_col_id != -1 && !folders.empty()) {
@@ -513,18 +501,6 @@ void TuiApp::run() {
             }
         }
 
-        auto root_name_for = [&](int64_t cid) -> std::string {
-            int64_t cur = cid;
-            const FolderInfo* root = nullptr;
-            for (int depth = 0; depth < 32 && cur != -1; ++depth) {
-                auto it = by_id.find(cur);
-                if (it == by_id.end()) break;
-                root = it->second;
-                cur = it->second->parent_id;
-            }
-            return (root && root->collection_id != cid) ? root->name : "";
-        };
-
         folder_rows.clear();
         folder_labels.clear();
         int matched_row = -1;
@@ -532,7 +508,7 @@ void TuiApp::run() {
         // Pinned rows at top
         for (const auto& f : folders) {
             if (!folder_prefs.pinned.count(f.collection_id) || is_hidden(f.collection_id)) continue;
-            std::string acct = root_name_for(f.collection_id);
+            std::string acct = folder_account_name(f.collection_id, by_id);
             std::string lbl = "★ " + (f.name.empty() ? f.full_path : f.name);
             if (!acct.empty()) lbl += " (" + acct + ")";
             if (f.collection_id == target_id && matched_row == -1) {
@@ -735,7 +711,7 @@ void TuiApp::run() {
             return true;
         }
         if (ev == Event::Character('h') || ev == Event::Character('H')) {
-            auto ids = collect_kmail_subtree(row.collection_id);
+            auto ids = collect_folder_subtree_ids(row.collection_id, folders);
             bool currently_hidden = folder_prefs.hidden.count(row.collection_id) > 0;
             db_.set_folders_hidden(ids, !currently_hidden);
             rebuild_kmail_tree(false);
@@ -757,7 +733,7 @@ void TuiApp::run() {
         std::vector<int64_t> sys_ids;
         for (const auto& f : folders) {
             if (is_system_mail_folder(f.name)) {
-                auto sub = collect_kmail_subtree(f.collection_id);
+                auto sub = collect_folder_subtree_ids(f.collection_id, folders);
                 sys_ids.insert(sys_ids.end(), sub.begin(), sub.end());
             }
         }
@@ -779,7 +755,7 @@ void TuiApp::run() {
         select_visible(kmail_articles, kmail_view, kmail_filter, false);
     });
     auto kmail_btn_stage = Button("Stage Selected", [&]() {
-        run_stage(kmail_articles, "emails", {});
+        run_stage(kmail_articles, kmail_view, kmail_filter, "emails", {});
     });
 
     auto kmail_container = Container::Vertical({
@@ -879,7 +855,7 @@ void TuiApp::run() {
         set_status("Fetching Miniflux categories...");
         worker_pool.launch([&]() {
             try {
-                auto raw = miniflux_fetcher_.fetch_categories().get();
+                auto raw = miniflux_fetcher_.fetch_categories(worker_pool.stop_flag()).get();
                 if (worker_pool.is_shutting_down()) return;
                 if (cache_metadata) db_.save_category_cache(raw);
 
@@ -932,7 +908,7 @@ void TuiApp::run() {
         set_status("Fetching Miniflux entries...");
         worker_pool.launch([&, params]() {
             try {
-                auto entries = miniflux_fetcher_.fetch_entries(params).get();
+                auto entries = miniflux_fetcher_.fetch_entries(params, worker_pool.stop_flag()).get();
                 if (worker_pool.is_shutting_down()) return;
 
                 std::vector<SelectableArticle> out;
@@ -995,8 +971,8 @@ void TuiApp::run() {
         select_visible(mf_articles, mf_view, mf_filter, false);
     });
     auto mf_btn_stage = Button("Stage Selected", [&]() {
-        run_stage(mf_articles, "Miniflux entries", [&](const StageItem& it) {
-            return miniflux_fetcher_.fetch_original_content(it.source_id).get();
+        run_stage(mf_articles, mf_view, mf_filter, "Miniflux entries", [&](const StageItem& it) {
+            return miniflux_fetcher_.fetch_original_content(it.source_id, worker_pool.stop_flag()).get();
         });
     });
 
@@ -1095,7 +1071,7 @@ void TuiApp::run() {
         set_status("Fetching RSS feed: " + feed_title + "...");
         worker_pool.launch([&, feed_url, max_items]() {
             try {
-                auto items = rss_fetcher_.fetch_items(feed_url, max_items).get();
+                auto items = rss_fetcher_.fetch_items(feed_url, max_items, worker_pool.stop_flag()).get();
                 if (worker_pool.is_shutting_down()) return;
 
                 std::vector<SelectableArticle> out;
@@ -1199,8 +1175,8 @@ void TuiApp::run() {
         select_visible(rss_articles, rss_view, rss_filter, false);
     });
     auto rss_btn_stage = Button("Stage Selected", [&]() {
-        run_stage(rss_articles, "RSS entries", [&](const StageItem& it) {
-            return it.url.empty() ? std::string{} : html_extractor_.fetch_and_extract(it.url).get();
+        run_stage(rss_articles, rss_view, rss_filter, "RSS entries", [&](const StageItem& it) {
+            return it.url.empty() ? std::string{} : html_extractor_.fetch_and_extract(it.url, worker_pool.stop_flag()).get();
         });
     });
 
